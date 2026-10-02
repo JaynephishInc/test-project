@@ -273,6 +273,77 @@ task.spawn(function()
 end)
 
 for _, v in ipairs(ORDER) do pcall(build, v) end
+
+---------------------------------------------------------------- respawn timers
+-- While a boss is down, a big sign floats over its home spot counting down to its return. Players who can reach
+-- the island get a 30-second warning and a "the boss is back" message.
+local THEME = {
+	Gold = Color3.fromRGB(255, 200, 60), Diamond = Color3.fromRGB(120, 220, 255), Cosmic = Color3.fromRGB(180, 120, 255),
+	Lava = Color3.fromRGB(255, 110, 30), Toxic = Color3.fromRGB(150, 255, 60), Glitch = Color3.fromRGB(255, 60, 220),
+}
+local timerModel = workspace:FindFirstChild("IslandBossTimers") or Instance.new("Model")
+timerModel.Name = "IslandBossTimers"
+timerModel.ModelStreamingMode = Enum.ModelStreamingMode.Persistent -- visible from anywhere, like the vault beacon
+timerModel.Parent = workspace
+timerModel:ClearAllChildren()
+local function tellIsland(variant, text)
+	for _, p in ipairs(Players:GetPlayers()) do
+		local ok, open = pcall(function() return not _G.PlazaIslandUnlocked or _G.PlazaIslandUnlocked(p, variant) end)
+		if ok and open then Notify:FireClient(p, text) end
+	end
+end
+local function makeTimer(variant, b)
+	local color = THEME[variant] or Color3.fromRGB(255, 80, 80)
+	local anchor = Instance.new("Part")
+	anchor.Name = variant .. "BossTimer"; anchor.Transparency = 1; anchor.Size = Vector3.one
+	anchor.Anchored = true; anchor.CanCollide = false; anchor.CanQuery = false; anchor.CanTouch = false
+	anchor.Position = b.home.Position + Vector3.new(0, b.halfH + 8, 0)
+	anchor.Parent = timerModel
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "BossTimer"; gui.Size = UDim2.fromOffset(300, 96); gui.AlwaysOnTop = true; gui.LightInfluence = 0
+	gui.MaxDistance = 350; gui.Enabled = false; gui.Parent = anchor
+	local frame = Instance.new("Frame"); frame.Size = UDim2.fromScale(1, 1); frame.BackgroundColor3 = Color3.fromRGB(22, 18, 37)
+	frame.BackgroundTransparency = 0.08; frame.Parent = gui
+	Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 16)
+	local stroke = Instance.new("UIStroke"); stroke.Color = color; stroke.Thickness = 3; stroke.Parent = frame
+	local title = Instance.new("TextLabel"); title.BackgroundTransparency = 1; title.Position = UDim2.fromOffset(10, 6); title.Size = UDim2.new(1, -20, 0, 38)
+	title.Font = Enum.Font.FredokaOne; title.TextScaled = true; title.TextColor3 = color; title.Text = "👑 " .. variant:upper() .. " BOSS DEFEATED"; title.Parent = frame
+	local sub = Instance.new("TextLabel"); sub.BackgroundTransparency = 1; sub.Position = UDim2.fromOffset(10, 48); sub.Size = UDim2.new(1, -20, 0, 38)
+	sub.Font = Enum.Font.GothamBold; sub.TextScaled = true; sub.TextColor3 = Color3.new(1, 1, 1); sub.Text = ""; sub.Parent = frame
+	return gui, sub
+end
+local timers = {}
+for variant, b in pairs(bosses) do
+	local gui, sub = makeTimer(variant, b)
+	timers[variant] = { gui = gui, sub = sub, wasDown = false, warned = false }
+end
+task.spawn(function()
+	while true do
+		task.wait(1)
+		for variant, t in pairs(timers) do
+			local b = bosses[variant]
+			local m = b and b.model
+			local down = m and m.Parent and m:GetAttribute("Active") == false
+			local respawnAt = m and m:GetAttribute("RespawnAt")
+			if down and respawnAt then
+				local left = math.max(0, math.ceil(respawnAt - workspace:GetServerTimeNow()))
+				t.gui.Enabled = true
+				t.sub.Text = ("Returns in %d:%02d"):format(left // 60, left % 60)
+				if left <= 30 and not t.warned then
+					t.warned = true
+					tellIsland(variant, ("👑 The %s Island boss returns in 30 seconds! Get your squad ready!"):format(variant))
+				end
+				t.wasDown = true
+			else
+				t.gui.Enabled = false
+				if t.wasDown and m and m.Parent and m:GetAttribute("Active") then
+					tellIsland(variant, ("👑 %s is back on %s Island! Team up to defeat it!"):format(b.name, variant))
+				end
+				t.wasDown, t.warned = false, false
+			end
+		end
+	end
+end)
 task.spawn(function()
 	local last = os.clock()
 	while true do

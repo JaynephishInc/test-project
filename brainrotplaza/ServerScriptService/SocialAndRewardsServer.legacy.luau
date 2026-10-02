@@ -11,8 +11,10 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local SS = game:GetService("ServerStorage")
 local BadgeService = game:GetService("BadgeService")
+local DataStoreService = game:GetService("DataStoreService")
 
 local remotes = RS:WaitForChild("BrainrotRemotes")
+local Notify = remotes:WaitForChild("Notify")
 local SocialAction = remotes:FindFirstChild("SocialAction") or Instance.new("RemoteFunction")
 SocialAction.Name = "SocialAction"; SocialAction.Parent = remotes
 local SocialEvent = remotes:FindFirstChild("SocialEvent") or Instance.new("RemoteEvent")
@@ -75,6 +77,16 @@ local ACH = {
 	{ id = "streak_30", icon = "🗓️", name = "Superfan", desc = "Reach a 30-day login streak", stat = "streak", goal = 30, reward = { coins = 100000, luck = 25 }, badge = 0 },
 	{ id = "daily_10", icon = "🍌", name = "Banana's Helper", desc = "Finish 10 daily quests", stat = "dailyQuests", goal = 10, reward = { coins = 10000 }, badge = 0 },
 	{ id = "daily_100", icon = "🏅", name = "Banana's Best Friend", desc = "Finish 100 daily quests", stat = "dailyQuests", goal = 100, reward = { luck = 20 }, badge = 0 },
+	-- events
+	{ id = "golden_egg", icon = "🔎", name = "Golden Find", desc = "Find a Golden Egg", stat = "goldenEggs", goal = 1, reward = { luck = 3 }, badge = 0 },
+	{ id = "golden_egg_10", icon = "🕵️", name = "Egg Detective", desc = "Find 10 Golden Eggs", stat = "goldenEggs", goal = 10, reward = { coins = 50000, luck = 10 }, badge = 0 },
+	{ id = "tournament_top10", icon = "🎖️", name = "Tournament Star", desc = "Finish in the top 10 of a Weekend Tournament", stat = "tournamentTop10", goal = 1, reward = { luck = 10 }, badge = 0 },
+	-- collections
+	{ id = "collection_1", icon = "🗂️", name = "Completionist", desc = "Complete a mutation collection", stat = "collections", goal = 1, reward = { luck = 10 }, badge = 0 },
+	{ id = "collection_all", icon = "🌌", name = "Master Collector", desc = "Complete all 7 mutation collections", stat = "collections", goal = 7, reward = { coins = 1000000, luck = 50 }, badge = 0 },
+	-- friends
+	{ id = "invite_1", icon = "💌", name = "Recruiter", desc = "Invite a friend who joins for the first time", stat = "referrals", goal = 1, reward = { luck = 5 }, badge = 0 },
+	{ id = "invite_10", icon = "📣", name = "Influencer", desc = "Invite 10 friends who join for the first time", stat = "referrals", goal = 10, reward = { coins = 100000, luck = 20 }, badge = 0 },
 }
 
 local function fmt(n) local s = tostring(math.floor(n)):reverse():gsub("(%d%d%d)", "%1,"):reverse() return (s:gsub("^,", "")) end
@@ -140,6 +152,8 @@ local function statValue(plr, d, stat)
 	elseif stat == "rebirths" then return d.Rebirths or 0
 	elseif stat == "bestFusion" then local m = 0; for _, lv in pairs(d.FusionLevels or {}) do m = math.max(m, lv) end; return m
 	elseif stat == "bossIslands" then return count(s.bossIslands)
+	elseif stat == "collections" then return count(type(d.Flair) == "table" and d.Flair.collections)
+	elseif stat == "referrals" then return type(d.Referral) == "table" and tonumber(d.Referral.count) or 0
 	elseif stat == "friends" then return plr:GetAttribute("FriendCount") or 0 end
 	return tonumber(s[stat]) or 0
 end
@@ -192,7 +206,8 @@ local function noteBrainrot(plr, id) -- rarest hatch so far + Glitch brainrots
 	s.bestRarity = math.max(tonumber(s.bestRarity) or 0, RARITY_RANK[e.rarity] or 0)
 	if e.variant == "Glitch" then s.glitch = (tonumber(s.glitch) or 0) + 1 end
 end
--- other scripts report events here: "catch" (WildCaptureAndStorms), "boss" (IslandBossServer), "dailyQuest" (DailyRewardsServer)
+-- other scripts report events here: "catch" (WildCaptureAndStorms), "boss" (IslandBossServer), "dailyQuest" (DailyRewardsServer),
+-- "goldenEgg" (TreasureHuntServer), "tournamentTop10" (TournamentServer)
 _G.PlazaAchievementEvent = function(plr, what, arg)
 	if what == "catch" then
 		noteBrainrot(plr, arg)
@@ -206,6 +221,10 @@ _G.PlazaAchievementEvent = function(plr, what, arg)
 		bump(plr, "bosses")
 	elseif what == "dailyQuest" then
 		bump(plr, "dailyQuests")
+	elseif what == "goldenEgg" then
+		bump(plr, "goldenEggs")
+	elseif what == "tournamentTop10" then
+		bump(plr, "tournamentTop10")
 	end
 end
 
@@ -296,10 +315,74 @@ local function offlineOffer(plr, d)
 	SocialEvent:FireClient(plr, "offline", { coins = coins, seconds = seconds, capped = away > OFFLINE_MAX })
 end
 
+---------------------------------------------------------------- invite a friend
+-- A player who joins Brainrot Plaza for the FIRST time through a friend's invite (Roblox menu > Invite Friends,
+-- or a shared link) gets a welcome gift, and the friend who invited them gets a reward: right away if they're in
+-- the same server, otherwise the next time they play. Rewards stop after INVITE_MAX invites (stops alt farming).
+local INVITE_NEW = { coins = 500, luck = 3 }
+local INVITE_FRIEND = { coins = 2500, luck = 5 }
+local INVITE_MAX = 25
+local okRef, refStore = pcall(function() return DataStoreService:GetDataStore("PlazaReferrals_v1") end)
+if not okRef then refStore = nil end
+local function referralOf(d)
+	d.Referral = type(d.Referral) == "table" and d.Referral or {}
+	return d.Referral
+end
+local function rewardInviter(plr, d, invites, newName)
+	local ref = referralOf(d)
+	local before = ref.count or 0
+	ref.count = before + invites
+	local paid = math.max(0, math.min(invites, INVITE_MAX - before))
+	if paid > 0 then
+		d.Money = (d.Money or 0) + INVITE_FRIEND.coins * paid
+		d.LuckRolls = (d.LuckRolls or 0) + INVITE_FRIEND.luck * paid
+		if _G.PlazaSyncPlayer then _G.PlazaSyncPlayer(plr) end
+	end
+	local who = newName and (newName .. " joined from your invite") or (invites == 1 and "A friend joined from your invite" or (invites .. " friends joined from your invites"))
+	Notify:FireClient(plr, paid > 0 and ("💌 %s! +%s coins + %d lucky hatches!"):format(who, fmt(INVITE_FRIEND.coins * paid), INVITE_FRIEND.luck * paid)
+		or ("💌 %s! Thanks for sharing Brainrot Plaza!"):format(who))
+	check(plr)
+end
+local function handleInvites(plr, d)
+	local ref = referralOf(d)
+	-- 1) did this brand-new player come from someone's invite?
+	local okJoin, joinData = pcall(function() return plr:GetJoinData() end)
+	local by = okJoin and type(joinData) == "table" and tonumber(joinData.ReferredByPlayerId) or 0
+	if by > 0 and by ~= plr.UserId and d.LastSavedAt == nil and not ref.by then
+		ref.by = by
+		d.Money = (d.Money or 0) + INVITE_NEW.coins
+		d.LuckRolls = (d.LuckRolls or 0) + INVITE_NEW.luck
+		if _G.PlazaSyncPlayer then _G.PlazaSyncPlayer(plr) end
+		task.delay(7, function()
+			if plr.Parent then Notify:FireClient(plr, ("🎁 Your friend invited you! Welcome gift: +%s coins + %d lucky hatches!"):format(fmt(INVITE_NEW.coins), INVITE_NEW.luck)) end
+		end)
+		local inviter = Players:GetPlayerByUserId(by)
+		local inviterData = inviter and _G.PlazaGetData and _G.PlazaGetData(inviter)
+		if inviterData then
+			rewardInviter(inviter, inviterData, 1, plr.DisplayName)
+		elseif refStore then
+			pcall(function() refStore:UpdateAsync(tostring(by), function(old) return (tonumber(old) or 0) + 1 end) end)
+		end
+	end
+	-- 2) did friends join from MY invites while I was away?
+	if refStore then
+		local waiting = 0
+		local ok = pcall(function()
+			refStore:UpdateAsync(tostring(plr.UserId), function(old)
+				waiting = tonumber(old) or 0
+				if waiting == 0 then return nil end
+				return 0
+			end)
+		end)
+		if ok and waiting > 0 then rewardInviter(plr, d, waiting) end
+	end
+end
+
 ---------------------------------------------------------------- players
 Players.PlayerAdded:Connect(function(plr)
 	task.spawn(function()
 		local d = dataOf(plr)
+		if d then pcall(handleInvites, plr, d) end
 		refreshFriends()
 		-- tell friends (and the new player) about each other
 		for _, q in ipairs(Players:GetPlayers()) do

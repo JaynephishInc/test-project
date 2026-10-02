@@ -241,8 +241,11 @@ local function breakModel(model,finisher)
 		task.delay(4,function() damageBy[model]=nil;if model.Parent then model:Destroy() end end)
 		return
 	end
-	task.delay(model:GetAttribute("RespawnTime") or 10,function()
+	local respawnIn=model:GetAttribute("RespawnTime") or 10
+	model:SetAttribute("RespawnAt",workspace:GetServerTimeNow()+respawnIn) -- boss timers / clients can count down to it
+	task.delay(respawnIn,function()
 		if not model.Parent then return end
+		model:SetAttribute("RespawnAt",nil)
 		local max=model:GetAttribute("MaxHealth") or 100
 		model:SetAttribute("Health",max)
 		local mutation=mutationOf(model)

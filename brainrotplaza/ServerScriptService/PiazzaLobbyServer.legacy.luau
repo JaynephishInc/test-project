@@ -28,8 +28,6 @@ local CONFIG = {
 	HologramHeight = 55,
 	EruptRarities = { Legendary = true, Mythic = true },
 	SafeZoneHalfSize = 245,
-	-- Weekend tournament: starts Saturday 17:00 UTC (10am Pacific), lasts 30 hours
-	TournamentWday = 7, TournamentHourUTC = 17, TournamentHours = 30,
 }
 local Balance = require(RS:WaitForChild("GameBalance"))
 local Design = require(RS:WaitForChild("ProgressionDesign"))
@@ -168,6 +166,16 @@ local function syncStats(plr)
 	plr:SetAttribute("Bounty", (d.Streak or 0) >= CONFIG.CrownStreak and (CONFIG.BountyBase + CONFIG.BountyPerStreak * d.Streak) * 100 or 0)
 end
 
+-- Coins change many times a second while squads attack, so payouts only refresh the money display
+-- instead of re-sending the whole inventory every time.
+local function syncMoney(plr)
+	local d = data[plr]; if not d then return end
+	local ls = plr:FindFirstChild("leaderstats")
+	local money = ls and ls:FindFirstChild("Money")
+	if money then money.Value = math.floor(d.Money) end
+	plr:SetAttribute("Money", math.floor(d.Money))
+end
+
 -- Public hooks used by the active breakable economy.
 _G.PlazaAwardMoney = function(plr, baseAmount)
 	local d = data[plr]
@@ -181,7 +189,7 @@ _G.PlazaAwardMoney = function(plr, baseAmount)
 	bonus *= 1 + (plr:GetAttribute("FriendBoost") or 0) -- friends in your server (SocialAndRewardsServer)
 	local amount = math.max(0, math.floor((tonumber(baseAmount) or 0) * bonus))
 	d.Money += amount
-	syncStats(plr)
+	syncMoney(plr)
 	return true, amount
 end
 _G.PlazaGetAttackTeam = function(plr)
@@ -282,6 +290,7 @@ local function save(plr, release)
 		QuestProgress = d.QuestProgress, QuestCompleted = d.QuestCompleted, ActiveQuest = d.ActiveQuest,
 		GiftPlaySeconds = GiftProgress.Elapsed(d, os.time()), GiftsClaimed = d.GiftsClaimed,
 		Daily = d.Daily, Login = d.Login, Achievements = d.Achievements, AchStats = d.AchStats, TutorialDone = d.TutorialDone, TutorialGift = d.TutorialGift, -- DailyRewardsServer
+		Tournament = d.Tournament, Flair = d.Flair, Referral = d.Referral, -- TournamentServer, PlayerFlairServer, SocialAndRewardsServer
 	}
 	activeSaves += 1
 	local lost = false
@@ -680,6 +689,15 @@ for _, console in ipairs(taggedInWorld("RollConsole")) do
 	local prompt = console:FindFirstChild("RollPrompt", true)
 	if prompt then prompt.Triggered:Connect(function(plr) doRoll(plr) end) end
 end
+-- A free hatch given as a prize (Golden Egg hunt). variant = an island mutation, or nil for a regular hatch.
+-- Returns false when the backpack is full.
+_G.PlazaFreeHatch = function(plr, variant)
+	local d = data[plr]; if not d then return false end
+	if Inventory.Count(d.Collection) >= capOf(d) then return false end
+	lastRoll[plr] = nil
+	doRoll(plr, nil, variant, 0)
+	return true
+end
 -- Studio testing helper: ServerStorage.BrainrotEvents.TestRoll:Fire(player, "Mythic")
 local TestRoll = events:FindFirstChild("TestRoll") or Instance.new("BindableEvent")
 TestRoll.Name = "TestRoll"; TestRoll.Parent = events
@@ -808,29 +826,6 @@ task.spawn(function()
 	end
 end)
 
-local function tournamentText()
-	local now = os.time()
-	local t = os.date("!*t", now)
-	-- start of this week's tournament day
-	local daysUntil = (CONFIG.TournamentWday - t.wday) % 7
-	local startToday = now - (t.hour * 3600 + t.min * 60 + t.sec) + CONFIG.TournamentHourUTC * 3600
-	local start = startToday + daysUntil * 86400
-	local prevStart = start - 7 * 86400
-	if now >= prevStart and now < prevStart + CONFIG.TournamentHours * 3600 then return "🏆 WEEKEND TOURNAMENT IS LIVE!", true end
-	if now >= start and now < start + CONFIG.TournamentHours * 3600 then return "🏆 WEEKEND TOURNAMENT IS LIVE!", true end
-	if now >= start + CONFIG.TournamentHours * 3600 then start += 7 * 86400 end
-	local left = start - now
-	local d, h, m, s = math.floor(left / 86400), math.floor(left % 86400 / 3600), math.floor(left % 3600 / 60), left % 60
-	return ("🏆 WEEKEND TOURNAMENT IN %dd %02dh %02dm %02ds"):format(d, h, m, s), false
-end
-local tScreen = showcase:FindFirstChild("TournamentScreen")
-local tLabel
-if tScreen then
-	local sg = Instance.new("SurfaceGui"); sg.Face = Enum.NormalId.Front; sg.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud; sg.PixelsPerStud = 20; sg.LightInfluence = 0; sg.Parent = tScreen
-	tLabel = Instance.new("TextLabel"); tLabel.Size = UDim2.fromScale(1, 1); tLabel.BackgroundTransparency = 1; tLabel.TextScaled = true
-	tLabel.Font = Enum.Font.FredokaOne; tLabel.TextColor3 = Color3.fromRGB(255,220,120); tLabel.Parent = sg
-end
-
 task.spawn(function()
 	while true do
 		-- Strongest Brainrots: global top if the DataStore works, otherwise this server
@@ -863,7 +858,6 @@ task.spawn(function()
 				wantedRows[i].TextColor3 = Color3.new(1,1,1)
 			end
 		end
-		if tLabel then local txt = tournamentText(); tLabel.Text = txt end
 		-- keep crown bounty text fresh
 		for _, p in ipairs(Players:GetPlayers()) do
 			local c = p.Character and p.Character:FindFirstChild("BountyCrown")
@@ -1546,6 +1540,20 @@ local oldFloorCoins=workspace:FindFirstChild("FloorCoins");if oldFloorCoins then
 
 -- ================= MEGA VAULT (Gold Island): lots of health, pays out gold to everyone who helped =================
 local EquippedBreakableDamage=require(game.ServerStorage:WaitForChild("EquippedBreakableDamage"))
+local MANUAL_DAMAGE = Balance.Breakables.ManualClickDamage or 1
+-- Shared by the Mega Vault and Giant Chest: pays with every coin boost (rebirths, potions, storms, friends)
+-- and reports the break so it counts for daily quests, island quests, achievements and the tournament.
+local function payTeamShare(p, reward, breakType)
+	local ok, paid = _G.PlazaAwardMoney(p, reward)
+	if not ok then paid = 0 end
+	local events = SS:FindFirstChild("ProgressionEvents")
+	local progress = events and events:FindFirstChild("QuestProgress")
+	if progress then progress:Fire(p, "Break", "Gold", 1, breakType) end
+	return paid
+end
+local function hitDamage(d) -- players with no squad equipped can still help by clicking
+	return math.max(EquippedBreakableDamage.ForTeam(d.Equipped) or 0, MANUAL_DAMAGE)
+end
 local VAULT_HP = 25000
 local VAULT_POOL = 50000        -- coins split by damage share
 local VAULT_MIN_REWARD = 1000   -- anyone who helped gets at least this
@@ -1573,7 +1581,7 @@ for _, vault in ipairs(taggedInWorld("MegaVault")) do
 		lastHit[plr] = now
 		local root=plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
 		if not root or (root.Position-vault:GetPivot().Position).Magnitude>125 then return end
-		local dmg = math.min(hp,EquippedBreakableDamage.ForTeam(d.Equipped))
+		local dmg = math.min(hp,hitDamage(d))
 		hp -= dmg
 		damage[plr] = (damage[plr] or 0) + dmg
 		if hub and hub:FindFirstChild("HitSparks") then hub.HitSparks:Emit(8) end
@@ -1587,9 +1595,9 @@ for _, vault in ipairs(taggedInWorld("MegaVault")) do
 				local pd = data[p]
 				if pd and p.Parent then
 					local reward = math.max(VAULT_MIN_REWARD, math.floor(VAULT_POOL * v / math.max(total, 1)))
-					pd.Money += reward; syncStats(p)
-					Notify:FireClient(p, ("💰 MEGA VAULT CRACKED! You did %d%% of the damage: +%s coins"):format(math.floor(v / total * 100 + 0.5), fmtN(reward)))
-					local fx = remotes:FindFirstChild("CoinCollected"); if fx then fx:FireClient(p, reward, "Gold") end
+					local paid = payTeamShare(p, reward, "Vault")
+					Notify:FireClient(p, ("💰 MEGA VAULT CRACKED! You did %d%% of the damage: +%s coins"):format(math.floor(v / total * 100 + 0.5), fmtN(paid)))
+					local fx = remotes:FindFirstChild("CoinCollected"); if fx then fx:FireClient(p, paid, "Gold") end
 				end
 			end
 			for _, p in ipairs(Players:GetPlayers()) do if not damage[p] then Notify:FireClient(p, "💰 The Mega Vault on Gold Island was just cracked!") end end
@@ -1640,7 +1648,7 @@ for _, chest in ipairs(taggedInWorld("GiantChest")) do
 		last[plr] = now
 		local root=plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
 		if not root or (root.Position-chest:GetPivot().Position).Magnitude>125 then return end
-		local dmg = math.min(hp,EquippedBreakableDamage.ForTeam(d.Equipped))
+		local dmg = math.min(hp,hitDamage(d))
 		hp -= dmg
 		dmgBy[plr] = (dmgBy[plr] or 0) + dmg
 		if lock and lock:FindFirstChild("HitSparks") then lock.HitSparks:Emit(10) end
@@ -1654,9 +1662,9 @@ for _, chest in ipairs(taggedInWorld("GiantChest")) do
 				local pd = data[p]
 				if pd and p.Parent then
 					local reward = math.max(CHEST_MIN, math.floor(CHEST_POOL * v / math.max(total, 1)))
-					pd.Money += reward; syncStats(p)
-					Notify:FireClient(p, ("🏴‍☠️ TREASURE CHEST BROKEN! You did %d%% of the damage: +%s coins"):format(math.floor(v / total * 100 + 0.5), fmtN(reward)))
-					local fx = remotes:FindFirstChild("CoinCollected"); if fx then fx:FireClient(p, reward, "Gold") end
+					local paid = payTeamShare(p, reward, "Chest")
+					Notify:FireClient(p, ("🏴‍☠️ TREASURE CHEST BROKEN! You did %d%% of the damage: +%s coins"):format(math.floor(v / total * 100 + 0.5), fmtN(paid)))
+					local fx = remotes:FindFirstChild("CoinCollected"); if fx then fx:FireClient(p, paid, "Gold") end
 				end
 			end
 			for _, p in ipairs(Players:GetPlayers()) do if not dmgBy[p] then Notify:FireClient(p, "🏴‍☠️ The Giant Treasure Chest was just broken open!") end end

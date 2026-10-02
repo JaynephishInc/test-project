@@ -54,5 +54,12 @@ Roblox lets you create a few badges free each day, so start with the ones player
 | `streak_30.png` | Superfan | Reach a 30-day login streak |
 | `daily_10.png` | Banana's Helper | Finish 10 daily quests |
 | `daily_100.png` | Banana's Best Friend | Finish 100 daily quests |
+| `golden_egg.png` | Golden Find | Find a Golden Egg |
+| `golden_egg_10.png` | Egg Detective | Find 10 Golden Eggs |
+| `tournament_top10.png` | Tournament Star | Finish in the top 10 of a Weekend Tournament |
+| `collection_1.png` | Completionist | Complete a mutation collection |
+| `collection_all.png` | Master Collector | Complete all 7 mutation collections |
+| `invite_1.png` | Recruiter | Invite a friend who joins for the first time |
+| `invite_10.png` | Influencer | Invite 10 friends who join for the first time |
 
 Icons come from the Noto Color Emoji font (SIL Open Font License), which allows using them in images like these.
