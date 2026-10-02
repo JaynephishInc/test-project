@@ -17,8 +17,6 @@ local MarketplaceService = game:GetService("MarketplaceService")
 
 local CONFIG = {
 	StartingTokens = 3,
-	FreeTokenEvery = 60,      -- seconds spent in the lobby per free token
-	FreeTokenCap = 10,        -- free tokens stop once you hold this many
 	RollCost = 1,
 	RollCooldown = 7.0,       -- matches the client reveal animation
 	RevealDelay = 6.25,
@@ -106,19 +104,12 @@ pcall(function() powerStore = DataStoreService:GetOrderedDataStore("PiazzaBrainr
 local data = {}
 
 local function newData()
-	return { Tokens = CONFIG.StartingTokens, Money = 0, Rebirths = 0, LuckRolls = 0, WheelSpins = 0, Hats = {}, EquippedHat = "", BestName = "", BestPower = 0, Kills = 0, Collection = {}, MoneyBoostUntil = 0, SpeedBoostUntil = 0, FusionLevels = {}, EggPity = {}, QuestProgress = {}, QuestCompleted = {}, ActiveQuest = "" }
+	return { Tokens = CONFIG.StartingTokens, Money = 0, Rebirths = 0, LuckRolls = 0, WheelSpins = 0, BestName = "", BestPower = 0, Kills = 0, Collection = {}, MoneyBoostUntil = 0, SpeedBoostUntil = 0, FusionLevels = {}, EggPity = {}, QuestProgress = {}, QuestCompleted = {}, ActiveQuest = "" }
 end
 
 local HttpService = game:GetService("HttpService")
 local powerOf = {["Grissino Grigio"]=10,["Olivetta Oliva"]=12,["Panino Pigro"]=15,["Biscottino Bello"]=18,["Risottino Ribelle"]=40,["Lasagnone Lento"]=50,["Bruschettina Brava"]=60,["Spaghettone Polpetto"]=120,["Gelatone Occhialone"]=140,["Tortellino Turbo"]=150,["Cannolino Razzo"]=320,["Moka Motorino"]=380,["Pizzaflamingo Espressone"]=1000}
 for _, list in pairs(BRAINROTS) do for _, b in ipairs(list) do powerOf[b[1]] = b[2] end end
-local HATS={
- ["Tin Foil Hat"]={money=.05,power=10,rarity="Common",color=Color3.fromRGB(190,201,219)},
- ["Propeller Cap"]={money=.10,power=25,rarity="Rare",color=Color3.fromRGB(69,157,255)},
- ["Traffic Cone"]={money=.12,power=40,rarity="Epic",color=Color3.fromRGB(255,137,47)},
- ["Cosmic Beanie"]={money=.20,power=100,rarity="Legendary",color=Color3.fromRGB(168,95,255)},
-}
-local function hatOf(d) return HATS[d.EquippedHat or ""] end
 local function capOf(d) return Inventory.Capacity + (d.ExtraSlots or 0) end
 local function speedOf(d)
 	local base = 16 + 3 * (d.SpeedLevel or 0)
@@ -130,8 +121,7 @@ local function recompute(d)
 	for name, count in pairs(d.Collection) do
 		if count > 0 and (powerOf[name] or 0) > best then best, bestName = powerOf[name], name end
 	end
-	local hat = hatOf(d)
-	d.BestPower = math.floor(best * multiplier(d)) + (hat and hat.power or 0); d.BestName = bestName
+	d.BestPower = math.floor(best * multiplier(d)); d.BestName = bestName
 end
 -- Coins per second for one brainrot = rarity base x mutation multiplier
 local COIN_RARITY = { Common = 5, Rare = 12, Epic = 30, Legendary = 75, Mythic = 200, ["Brainrot God"] = 600, Secret = 1500, OG = 5000, Unrated = 20 }
@@ -141,12 +131,6 @@ local function coinRate(id)
 	return (COIN_RARITY[e.rarity] or 1) * (COIN_MUTATION[e.variant] or 1)
 end
 _G.PlazaCoinRate = coinRate
-local function incomePerSecond(d)
-	local sum = 0
-	for id, count in pairs(d.Collection) do sum += coinRate(id) * count end
-	local hat = hatOf(d)
-	return sum * multiplier(d) * (1 + (hat and hat.money or 0))
-end
 local function syncStats(plr)
 	local d = data[plr]; if not d then return end
 	local ls = plr:FindFirstChild("leaderstats"); if not ls then return end
@@ -157,8 +141,6 @@ local function syncStats(plr)
 	plr:SetAttribute("LuckRolls", d.LuckRolls)
 	plr:SetAttribute("Income", 0) -- active breakables replaced passive income
 	plr:SetAttribute("Collection", HttpService:JSONEncode(d.Collection))
-	plr:SetAttribute("Hats", HttpService:JSONEncode(d.Hats or {}))
-	plr:SetAttribute("EquippedHat", d.EquippedHat or "")
 	plr:SetAttribute("WheelSpins", d.WheelSpins or 0)
 	plr:SetAttribute("InventoryCapacity", capOf(d))
 	if _G.PlazaSyncEquipped then _G.PlazaSyncEquipped(plr, d) end
@@ -190,8 +172,7 @@ end
 _G.PlazaAwardMoney = function(plr, baseAmount)
 	local d = data[plr]
 	if not d then return false, 0 end
-	local hat = hatOf(d)
-	local bonus = multiplier(d) * (1 + (hat and hat.money or 0))
+	local bonus = multiplier(d)
 	local collectionBonus = Design.CollectionBonus(d.Discovered)
 	bonus *= 1 + collectionBonus
 	if (d.MoneyBoostUntil or 0) > os.time() then bonus *= 2 end
@@ -237,34 +218,105 @@ _G.PlazaFuse = function(plr, id)
 end
 
 local GiftProgress=require(RS:WaitForChild("GiftProgress"))
-local function save(plr)
+
+-- Session lock: one server at a time owns a player's save. When someone hops servers, the new server waits for
+-- the old one to finish its last save before loading, and a server that has lost the lock never writes again.
+-- That stops fast server hops from loading old progress or overwriting newer progress.
+local SESSION_ID = game.JobId ~= "" and game.JobId or HttpService:GenerateGUID(false)
+local LOCK_STALE = math.max(300, (Balance.SaveInterval or 60) * 4) -- nobody refreshed it this long: that server crashed
+local LOCK_WAIT = RunService:IsStudio() and 5 or 20 -- wait this long for the old server, then take over
+-- removed features (hats, coin collectors) + bookkeeping: never loaded into play data, cleared from saves
+local REMOVED_KEYS = { "Hats", "EquippedHat", "Pending", "SessionLock", "CanSave" }
+local isRemovedKey = {}
+for _, k in ipairs(REMOVED_KEYS) do isRemovedKey[k] = true end
+local function keyOf(plr) return "u" .. plr.UserId end
+local function ownsLock(old) return type(old.SessionLock) == "table" and old.SessionLock.Id == SESSION_ID end
+
+-- Returns the saved table (nil for a brand new player), or false if it couldn't be loaded.
+local function loadData(plr)
+	local started, failures = os.clock(), 0
+	while plr.Parent do
+		local result, locked = nil, false
+		local ok, err = pcall(function()
+			store:UpdateAsync(keyOf(plr), function(old)
+				result, locked = nil, false
+				old = type(old) == "table" and old or {}
+				local lock = old.SessionLock
+				if type(lock) == "table" and lock.Id ~= SESSION_ID and os.time() - (tonumber(lock.Time) or 0) < LOCK_STALE
+					and os.clock() - started < LOCK_WAIT then
+					locked = true
+					return nil -- another server is still saving this player: don't write, try again in a moment
+				end
+				old.SessionLock = { Id = SESSION_ID, Time = os.time() }
+				result = old
+				return old
+			end)
+		end)
+		if ok and not locked then return result end
+		if not ok then
+			failures += 1
+			warn(("PiazzaLobbyServer: load failed for %s (try %d): %s"):format(plr.Name, failures, tostring(err)))
+			if failures >= 5 then return false end
+		end
+		task.wait(locked and 2 or math.min(2 ^ failures, 8))
+	end
+	return false
+end
+
+local activeSaves = 0
+local function save(plr, release)
 	local d = data[plr]
-	if not d or not store or not d.CanSave then return false end
+	if not d or not store or not d.CanSave or d.Released then return false end
+	if release then d.Released = true end
 	local payload = {
 		DataVersion = Balance.Version, LastSavedAt = os.time(),
 		Tokens = d.Tokens, Money = d.Money, Rebirths = d.Rebirths, LuckRolls = d.LuckRolls,
 		BestName = d.BestName, BestPower = d.BestPower, Kills = d.Kills,
 		Equipped = d.Equipped, Discovered = d.Discovered, EggHatches = d.EggHatches,
-		Islands = d.Islands, Pending = d.Pending, ExtraSlots = d.ExtraSlots,
+		Islands = d.Islands, ExtraSlots = d.ExtraSlots,
 		SpeedLevel = d.SpeedLevel, PowerLevel = d.PowerLevel, CoinLevel = d.CoinLevel,
 		Collection = d.Collection, InventoryOverflow = d.InventoryOverflow,
-		Hats = d.Hats, EquippedHat = d.EquippedHat, WheelSpins = d.WheelSpins,
+		WheelSpins = d.WheelSpins,
 		MoneyBoostUntil = d.MoneyBoostUntil, SpeedBoostUntil = d.SpeedBoostUntil,
 		FusionLevels = d.FusionLevels, EggPity = d.EggPity,
 		QuestProgress = d.QuestProgress, QuestCompleted = d.QuestCompleted, ActiveQuest = d.ActiveQuest,
 		GiftPlaySeconds = GiftProgress.Elapsed(d, os.time()), GiftsClaimed = d.GiftsClaimed,
 		Daily = d.Daily, Login = d.Login, Achievements = d.Achievements, AchStats = d.AchStats, TutorialDone = d.TutorialDone, TutorialGift = d.TutorialGift, -- DailyRewardsServer
 	}
-	local ok = pcall(function()
-		store:UpdateAsync("u" .. plr.UserId, function(old)
+	activeSaves += 1
+	local lost = false
+	local ok, err = pcall(function()
+		store:UpdateAsync(keyOf(plr), function(old)
 			old = type(old) == "table" and old or {}
+			lost = not ownsLock(old)
+			if lost then return nil end -- another server owns this save now: never overwrite it
 			for key, value in pairs(payload) do old[key] = value end
+			for _, key in ipairs(REMOVED_KEYS) do old[key] = nil end
+			if not release then old.SessionLock = { Id = SESSION_ID, Time = os.time() } end
 			return old
 		end)
 	end)
+	activeSaves -= 1
+	if not ok then warn(("PiazzaLobbyServer: save failed for %s: %s"):format(plr.Name, tostring(err))) end
+	if lost then
+		d.CanSave = false
+		warn(("PiazzaLobbyServer: %s's save is owned by another server now; this server stops saving it"):format(plr.Name))
+	end
+	if release and not ok then d.Released = false end -- the lock goes stale on its own if every retry fails
 	if powerStore and d.BestPower > 0 then pcall(function() powerStore:SetAsync(tostring(plr.UserId), d.BestPower) end) end
-	plr:SetAttribute("LastSaveSucceeded", ok)
+	ok = ok and not lost
+	if plr.Parent then plr:SetAttribute("LastSaveSucceeded", ok) end
 	return ok
+end
+-- Let go of the lock without writing (player left while their data was still loading).
+local function releaseLock(plr)
+	pcall(function()
+		store:UpdateAsync(keyOf(plr), function(old)
+			if type(old) ~= "table" or not ownsLock(old) then return nil end
+			old.SessionLock = nil
+			return old
+		end)
+	end)
 end
 
 -- Safe zone -------------------------------------------------------------------
@@ -375,23 +427,39 @@ end
 -- Players ---------------------------------------------------------------------
 local function onPlayer(plr)
 	local d = newData()
-	d.CanSave=false
+	d.CanSave = false
 	if store then
-		local ok, saved = pcall(function() return store:GetAsync("u"..plr.UserId) end)
-		d.CanSave=ok
-		if ok and type(saved) == "table" then
-			for k, v in pairs(saved) do if k~="CanSave" then d[k] = v end end
+		local saved = loadData(plr)
+		if not plr.Parent then -- left while loading
+			if saved ~= false then releaseLock(plr) end
+			return
+		end
+		if saved == false then
+			if not RunService:IsStudio() then
+				plr:Kick("Brainrot Plaza couldn't load your save right now. Your progress is safe, please rejoin in a minute!")
+				return
+			end
+			warn("PiazzaLobbyServer: couldn't load " .. plr.Name .. "'s save in Studio; playing WITHOUT saving")
+		else
+			d.CanSave = true
+			if type(saved) == "table" then
+				for k, v in pairs(saved) do if not isRemovedKey[k] then d[k] = v end end
+			end
 		end
 	end
 	d.Collection,d.InventoryOverflow=Inventory.Normalize(type(d.Collection)=="table" and d.Collection or {},type(d.InventoryOverflow)=="table" and d.InventoryOverflow or {},capOf(d))
 	d.Streak = 0
-	d.FreeTimer = CONFIG.FreeTokenEvery
 	d.JoinTime = os.time()
 	GiftProgress.Restore(d,os.time())
 	plr:SetAttribute("JoinTime", d.JoinTime)
 	plr:SetAttribute("GiftsClaimed", HttpService:JSONEncode(d.GiftsClaimed))
- plr:SetAttribute("GiftPlaySeconds",d.GiftPlaySeconds)
- plr:SetAttribute("GiftSessionStarted",d.GiftSessionStarted)
+	plr:SetAttribute("GiftPlaySeconds",d.GiftPlaySeconds)
+	plr:SetAttribute("GiftSessionStarted",d.GiftSessionStarted)
+	-- Hats, free tokens and free wheel spins were removed. These stay empty so older UI that reads them doesn't break.
+	plr:SetAttribute("Hats", "{}")
+	plr:SetAttribute("EquippedHat", "")
+	plr:SetAttribute("NextFreeToken", -1)
+	plr:SetAttribute("NextWheelSpin", -1)
 	recompute(d)
 	data[plr] = d
 	local ls = Instance.new("Folder"); ls.Name = "leaderstats"
@@ -402,14 +470,28 @@ local function onPlayer(plr)
 	syncStats(plr)
 	plr.CharacterAdded:Connect(function(c) hookCharacter(plr, c) end)
 	if plr.Character then task.spawn(hookCharacter, plr, plr.Character) end
-	task.delay(3, function()
-		-- welcome handled by the WelcomeScreen GUI
-	end)
 end
 Players.PlayerAdded:Connect(onPlayer)
 for _, p in ipairs(Players:GetPlayers()) do task.spawn(onPlayer, p) end
-Players.PlayerRemoving:Connect(function(plr) save(plr); data[plr] = nil end)
-game:BindToClose(function() for _, p in ipairs(Players:GetPlayers()) do save(p) end end)
+-- other parts of this script (the wheel) finish anything owed to the player here, before the last save
+local beforeLeave = {}
+Players.PlayerRemoving:Connect(function(plr)
+	for _, fn in ipairs(beforeLeave) do pcall(fn, plr) end
+	save(plr, true)
+	data[plr] = nil
+end)
+game:BindToClose(function()
+	for _, p in ipairs(Players:GetPlayers()) do
+		task.spawn(function()
+			for _, fn in ipairs(beforeLeave) do pcall(fn, p) end
+			save(p, true)
+		end)
+	end
+	-- wait for every save (these and the ones PlayerRemoving started) before the server shuts down
+	local started = os.clock()
+	task.wait(0.1)
+	while activeSaves > 0 and os.clock() - started < 25 do task.wait(0.2) end
+end)
 
 task.spawn(function()
 	while task.wait(1) do
@@ -423,14 +505,10 @@ task.spawn(function()
 end)
 task.spawn(function() while true do task.wait(Balance.SaveInterval); for _, p in ipairs(Players:GetPlayers()) do save(p) end end end)
 
--- Safe-zone + free token tick ---------------------------------------------------
+-- Safe zone tick -----------------------------------------------------------------
 task.spawn(function()
-	local acc = 0
 	while true do
-		local dt = task.wait(0.25)
-		acc += dt
-		local secondTick = acc >= 1
-		if secondTick then acc -= 1 end
+		task.wait(0.25)
 		for _, plr in ipairs(Players:GetPlayers()) do
 			local char = plr.Character
 			local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -444,18 +522,6 @@ task.spawn(function()
 				if safe and not ff then
 					ff = Instance.new("ForceField"); ff.Name = "SafeZoneShield"; ff.Visible = false; ff.Parent = char
 				elseif not safe and ff then ff:Destroy() end
-			end
-			local d = data[plr]
-			if secondTick and d then
-				if false then -- free tokens over time disabled
-					d.FreeTimer -= 1
-					if d.FreeTimer <= 0 then
-						d.FreeTimer = CONFIG.FreeTokenEvery
-						d.Tokens += 1; syncStats(plr)
-						Notify:FireClient(plr, "🪙 Free token! Go roll at the Reactor.")
-					end
-				end
-				plr:SetAttribute("NextFreeToken", -1)
 			end
 		end
 	end
@@ -571,8 +637,7 @@ local function doRoll(plr, forceRarity, forceVariant, costOverride)
 	end
 	local cost = costOverride or CONFIG.RollCost
 	if d.Tokens < cost then
-		local wait = plr:GetAttribute("NextFreeToken") or -1
-		Notify:FireClient(plr, wait > 0 and ("🪙 Out of tokens! Free token in %ds, or win fights in the Arena."):format(wait) or "🎰 Out of tokens! Win arena fights, spin the wheel, or buy tokens in the Shop.")
+		Notify:FireClient(plr, "🪙 You're out of tokens!")
 		return
 	end
 	lastRoll[plr] = now
@@ -943,80 +1008,18 @@ menuHandler = function(plr, action, arg)
 	return false, "Unknown action"
 end
 
--- Passive income is intentionally disabled. Equipped brainrots now earn money by attacking world breakables.
-
 -- ================= VARIANT INFO for clients =================
 do
 	local list = {}
 	for _, v in ipairs(RollConfig.Variants) do table.insert(list, { name = v.name, chance = v.weight/100, color = v.color:ToHex() }) end
-	local hats = {}
-	for name, h in pairs(HATS) do hats[name] = { money = h.money, power = h.power, rarity = h.rarity, color = h.color:ToHex() } end
-	variantInfo.Value = HttpService:JSONEncode({ variants = list, hats = hats })
+	variantInfo.Value = HttpService:JSONEncode({ variants = list, hats = {} }) -- hats were removed; empty so older UI doesn't break
 end
-
--- ================= HATS on characters =================
-local function applyHat(plr)
-	local char = plr.Character; if not char then return end
-	local head = char:FindFirstChild("Head"); if not head then return end
-	local old = char:FindFirstChild("GrandmaHat"); if old then old:Destroy() end
-	local d = data[plr]; if not d or not HATS[d.EquippedHat or ""] then return end
-	local name, h = d.EquippedHat, HATS[d.EquippedHat]
-	local m = Instance.new("Model"); m.Name = "GrandmaHat"
-	local function part(size, cf, color, mat, shape)
-		local p = Instance.new("Part"); p.Size = size; p.CFrame = head.CFrame * cf; p.Color = color; p.Material = mat or Enum.Material.SmoothPlastic
-		if shape then p.Shape = shape end
-		p.CanCollide = false; p.Massless = true; p.CanQuery = false; p.Parent = m
-		local w = Instance.new("WeldConstraint"); w.Part0 = head; w.Part1 = p; w.Parent = p
-		return p
-	end
-	if name == "Tin Foil Hat" then
-		local cone = Instance.new("WedgePart")
-		part(Vector3.new(1.4, 1.2, 1.4), CFrame.new(0, 1.1, 0), h.color, Enum.Material.Foil)
-		part(Vector3.new(0.8, 0.8, 0.8), CFrame.new(0, 1.8, 0), h.color, Enum.Material.Foil, Enum.PartType.Ball)
-	elseif name == "Propeller Cap" then
-		part(Vector3.new(1.5, 0.6, 1.5), CFrame.new(0, 0.85, 0), h.color, nil, Enum.PartType.Ball)
-		part(Vector3.new(0.9, 0.15, 1), CFrame.new(0, 0.6, -0.8), Color3.fromRGB(255,220,60))
-		part(Vector3.new(0.15, 0.6, 0.15), CFrame.new(0, 1.3, 0), Color3.fromRGB(80,80,80))
-		part(Vector3.new(2.2, 0.08, 0.35), CFrame.new(0, 1.6, 0), Color3.fromRGB(255,60,80), Enum.Material.Neon)
-	elseif name == "Traffic Cone" then
-		part(Vector3.new(1.8, 0.2, 1.8), CFrame.new(0, 0.8, 0), h.color)
-		part(Vector3.new(1.1, 1, 1.1), CFrame.new(0, 1.4, 0), h.color)
-		part(Vector3.new(1.15, 0.25, 1.15), CFrame.new(0, 1.4, 0), Color3.new(1,1,1))
-		part(Vector3.new(0.6, 0.8, 0.6), CFrame.new(0, 2.2, 0), h.color)
-	elseif name == "Cosmic Beanie" then
-		part(Vector3.new(1.4, 0.9, 1.4), CFrame.new(0, 0.85, 0), h.color, Enum.Material.Fabric, Enum.PartType.Ball)
-		local pom = part(Vector3.new(0.6, 0.6, 0.6), CFrame.new(0, 1.45, 0), Color3.fromRGB(255,255,255), Enum.Material.Neon, Enum.PartType.Ball)
-		local sp = Instance.new("Sparkles"); sp.SparkleColor = h.color; sp.Parent = pom
-	end
-	m.Parent = char
-end
-local function hookHat(plr)
-	plr.CharacterAdded:Connect(function(c) c:WaitForChild("Head", 10); task.wait(0.5); applyHat(plr) end)
-	if plr.Character then task.spawn(applyHat, plr) end
-end
-Players.PlayerAdded:Connect(hookHat)
-for _, p in ipairs(Players:GetPlayers()) do hookHat(p) end
-
-local function giveHat(plr, name)
-	local d = data[plr]; if not d then return end
-	d.Hats = d.Hats or {}
-	local first = not d.Hats[name]
-	d.Hats[name] = true
-	local cur = HATS[d.EquippedHat or ""]
-	local new = HATS[name]
-	if not cur or (new.money * 1000 + new.power) > (cur.money * 1000 + cur.power) then d.EquippedHat = name end
-	recompute(d); syncStats(plr); applyHat(plr)
-	return first
-end
-
--- (Suspicious Grandma / wishing fountain removed; old code in ServerStorage.BeforeGrandmaRemoval)
 
 -- ================= COIN WHEEL =================
 local wheel = piazza:FindFirstChild("CoinWheel")
 local WHEEL = Balance.Wheel -- clockwise from the pointer; must match the seven physical labels
 local WHEEL_WINDUP_TIME = Balance.WheelTiming.Windup
 local WHEEL_SPIN_TIME = Balance.WheelTiming.Spin
-local WHEEL_FREE_EVERY = Balance.WheelTiming.FreeSpinEvery
 local WheelSpin = remotes:FindFirstChild("WheelSpin") or Instance.new("RemoteEvent")
 WheelSpin.Name = "WheelSpin"; WheelSpin.Parent = remotes
 local wheelBusy = false
@@ -1082,11 +1085,40 @@ if wheel then
 	if click then click.MaxActivationDistance = 24; click.Parent = clickPart end
 	local wTotal = 0; for _, s in ipairs(WHEEL) do wTotal += s.w end
 
+	-- the prize of the spin that is still animating; paid when the wheel stops, or right away if the player leaves first
+	local pendingPrize = {}
+	local function payPrize(plr, spin, present)
+		if pendingPrize[plr] ~= spin then return end
+		pendingPrize[plr] = nil
+		local d, s = spin.d, spin.s
+		if s.coins then d.Money += s.coins end
+		if s.spins then d.WheelSpins = (d.WheelSpins or 0) + s.spins end
+		if not present then
+			if s.egg then d.Money += 1000 end -- can't hatch for someone who left: the egg becomes coins
+			return
+		end
+		syncStats(plr)
+		Notify:FireClient(plr, "🎡 You won " .. s.label .. "!")
+		if s.egg then
+			if Inventory.Count(d.Collection) >= capOf(d) then
+				d.Money += 1000; syncStats(plr)
+				Notify:FireClient(plr, "🎒 Inventory full, so your free egg became 1,000 coins.")
+			else
+				lastRoll[plr] = nil
+				doRoll(plr, nil, s.egg, 0)
+			end
+		end
+		if s.egg or (s.coins or 0) >= 1000 then
+			for _, p in ipairs(Players:GetPlayers()) do if p ~= plr then Notify:FireClient(p, ("🎡 %s won %s on the wheel!"):format(plr.DisplayName, s.label)) end end
+		end
+	end
+	table.insert(beforeLeave, function(plr) local spin = pendingPrize[plr]; if spin then payPrize(plr, spin, false) end end)
+
 	local function spinWheel(plr)
 		local d = data[plr]; if not d then return end
-		if wheelBusy then Notify:FireClient(plr, "🎡 Wheel is spinning... wait a sec!"); return end
+		if wheelBusy then Notify:FireClient(plr, "🎡 The wheel is spinning... wait a sec!"); return end
 		if (d.WheelSpins or 0) <= 0 then
-			Notify:FireClient(plr, "🎡 No spins left! A free spin charges every 10 minutes, and Gifts give more.")
+			Notify:FireClient(plr, "🎡 No spins left! Claim Gifts to get more spins.")
 			return
 		end
 		d.WheelSpins -= 1
@@ -1095,63 +1127,24 @@ if wheel then
 		local idx = 1
 		for i, s in ipairs(WHEEL) do x -= s.w; if x <= 0 then idx = i; break end end
 		wheelBusy = true
+		local spin = { d = d, s = WHEEL[idx] }
+		pendingPrize[plr] = spin
 		WheelSpin:FireAllClients(idx, WHEEL_SPIN_TIME, plr.DisplayName, WHEEL[idx].label)
 		task.spawn(function() animateWheel(idx) end)
 		task.delay(WHEEL_WINDUP_TIME + WHEEL_SPIN_TIME, function()
 			wheelBusy = false
-			if not plr.Parent then return end
-			local s = WHEEL[idx]
-			if s.coins then d.Money += s.coins end
-			if s.spins then d.WheelSpins = (d.WheelSpins or 0) + s.spins end
-			syncStats(plr)
-			Notify:FireClient(plr, "🎡 You won " .. s.label .. "!")
-			if s.egg then
-				if Inventory.Count(d.Collection) >= capOf(d) then
-					d.Money += 1000; syncStats(plr)
-					Notify:FireClient(plr, "🎒 Inventory full, so your free egg became 1,000 coins.")
-				else
-					lastRoll[plr] = nil
-					doRoll(plr, nil, s.egg, 0)
-				end
-			end
-			if s.egg or (s.coins or 0) >= 1000 then
-				for _, p in ipairs(Players:GetPlayers()) do if p ~= plr then Notify:FireClient(p, ("🎡 %s won %s on the wheel!"):format(plr.DisplayName, s.label)) end end
-			end
+			payPrize(plr, spin, plr.Parent ~= nil)
 		end)
 	end
 
 	if prompt then prompt.Triggered:Connect(spinWheel) end
 	if click then click.MouseClick:Connect(spinWheel) end
 end
--- free spin timer
-task.spawn(function()
-	while true do
-		task.wait(1)
-		for plr, d in pairs(data) do
-			d.WheelTimer = (d.WheelTimer or WHEEL_FREE_EVERY) - 1
-			if (d.WheelSpins or 0) >= 3 then d.WheelTimer = WHEEL_FREE_EVERY end
-			if false then -- free spins over time disabled
-				d.WheelTimer = WHEEL_FREE_EVERY
-				d.WheelSpins = (d.WheelSpins or 0) + 1
-				syncStats(plr)
-				Notify:FireClient(plr, "🎡 Free wheel spin ready!")
-			end
-			plr:SetAttribute("NextWheelSpin", -1)
-		end
-	end
-end)
-
--- equip hats from the Inventory menu
+-- equip brainrots from the Inventory menu
 local baseInvoke = menuHandler
 MenuAction.OnServerInvoke = function(plr, action, arg)
 	if (action == "equip" or action == "unequip") and _G.PlazaEquipAction then return _G.PlazaEquipAction(plr, data[plr], action, arg) end
-	if action == "equipHat" then
-		local d = data[plr]; if not d then return false, "Loading..." end
-		if arg == "" then d.EquippedHat = ""; recompute(d); syncStats(plr); applyHat(plr); return true, "Hat removed" end
-		if type(arg) ~= "string" or not (d.Hats and d.Hats[arg]) then return false, "You don't own that hat" end
-		d.EquippedHat = arg; recompute(d); syncStats(plr); applyHat(plr)
-		return true, "Wearing " .. arg
-	end
+	if action == "equipHat" then return false, "Hats were removed from the game" end
 	return baseInvoke(plr, action, arg)
 end
 
@@ -1388,62 +1381,14 @@ task.spawn(function()
 	end
 end)
 
--- ================= COIN COLLECTORS: brainrots fill a bank per mutation; step on that island's collector =================
+-- ================= COIN INFO for clients =================
+-- Passive income and coin collector pads were removed: coins come from breaking treasure with your squad.
 local coinRatesValue = remotes:FindFirstChild("CoinRates") or Instance.new("StringValue")
 coinRatesValue.Name = "CoinRates"; coinRatesValue.Value = HttpService:JSONEncode({ rarity = COIN_RARITY, mutation = COIN_MUTATION }); coinRatesValue.Parent = remotes
-local lastPendingKey = {}
-_G.PlazaAccrue = function(plr, d)
-	if true then -- coins only come from the map now (floor coins, vault, chest, wheel)
-		if plr:GetAttribute("Income") ~= 0 then plr:SetAttribute("Income", 0) end
-		return
-	end
-	if type(d.Pending) ~= "table" then d.Pending = {} end
-	local m = multiplier(d)
-	local hat = hatOf(d)
-	local bonus = m * (1 + (hat and hat.money or 0))
-	local total = 0
-	for id, count in pairs(d.Collection) do
-		local e = Catalog.ById[id]
-		if e and count > 0 then
-			local r = coinRate(id) * count * bonus
-			d.Pending[e.variant] = (d.Pending[e.variant] or 0) + r
-			total += r
-		end
-	end
-	local show = {}
-	for v, amt in pairs(d.Pending) do show[v] = math.floor(amt) end
-	local key = HttpService:JSONEncode(show)
-	if lastPendingKey[plr] ~= key then lastPendingKey[plr] = key; plr:SetAttribute("Pending", key) end
-	plr:SetAttribute("Income", total)
-end
-local lastCollect = {}
-local function collect(plr, variant)
-	local d = data[plr]; if not d or type(d.Pending) ~= "table" then return end
-	if lastCollect[plr] and os.clock() - lastCollect[plr] < 0.8 then return end
-	lastCollect[plr] = os.clock()
-	local amt = math.floor(d.Pending[variant] or 0)
-	if amt <= 0 then return end
-	d.Pending[variant] = (d.Pending[variant] or 0) - amt
-	d.Money += amt
-	syncStats(plr)
-	_G.PlazaAccrue(plr, d)
-	local CollectFx = remotes:FindFirstChild("CoinCollected")
-	if CollectFx then CollectFx:FireClient(plr, amt, variant) end
-end
+_G.PlazaAccrue = function() end -- kept as a no-op in case another script still calls it
 do
 	local ev = remotes:FindFirstChild("CoinCollected") or Instance.new("RemoteEvent"); ev.Name = "CoinCollected"; ev.Parent = remotes
 end
-for _, pad in ipairs(taggedInWorld("CoinCollector")) do
-	local variant = pad:GetAttribute("Variant")
-	pad.Touched:Connect(function(hit)
-		local plr = Players:GetPlayerFromCharacter(hit.Parent)
-		if plr then
-			if variant ~= "Normal" and _G.PlazaIslandUnlocked and not _G.PlazaIslandUnlocked(plr, variant) then return end
-			collect(plr, variant)
-		end
-	end)
-end
-Players.PlayerRemoving:Connect(function(plr) lastPendingKey[plr] = nil; lastCollect[plr] = nil end)
 
 -- ================= ONE THEMED EGG PER ISLAND (rarity roll + mutation pricing) =================
 local ISLAND_EGG_SPEED = 0

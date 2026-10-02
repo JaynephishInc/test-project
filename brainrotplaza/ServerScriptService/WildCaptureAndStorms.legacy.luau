@@ -42,7 +42,7 @@ local function grant(plr, id, model)
 	if _G.PlazaSyncPlayer then _G.PlazaSyncPlayer(plr) end
 	if _G.PlazaSyncIndex then pcall(_G.PlazaSyncIndex, plr, d) end
 	Notify:FireClient(plr, ("🎯 You caught a wild %s!%s"):format(label, isNew and " (NEW in your Index!)" or ""))
-	if _G.PlazaAchievementEvent then task.spawn(_G.PlazaAchievementEvent, plr, "catch") end
+	if _G.PlazaAchievementEvent then task.spawn(_G.PlazaAchievementEvent, plr, "catch", id) end
 	WildCaught:FireClient(plr, { id = id, name = entry.name, variant = entry.variant, rarity = entry.rarity, isNew = isNew, pos = model:GetPivot().Position })
 end
 

@@ -1,8 +1,11 @@
 -- SocialAndRewardsServer
 -- 1) Friend boost: +10% coins for every friend playing in your server (max +50%).
 -- 2) While you were away: your squad keeps collecting while you're offline (5 min - 8 h); claim it on return.
--- 3) Achievements: 18 goals with rewards. Each can also award a real Roblox badge: create the badge on the
---    Creator Dashboard and paste its id into BADGES below.
+-- 3) Achievements with rewards. Any achievement can also give a real Roblox badge:
+--    a) Creator Dashboard > your experience > Associated Items > Badges > Create a Badge
+--       (use the achievement's name, description and badge image)
+--    b) copy the new badge's ID and paste it as `badge = ` on that achievement's line below.
+--    Players who already earned the achievement get the badge the next time they join.
 
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
@@ -21,32 +24,70 @@ local okCat, Catalog = pcall(function() return require(RS:WaitForChild("Brainrot
 local FRIEND_BONUS, FRIEND_MAX = 0.10, 5
 local OFFLINE_MIN, OFFLINE_MAX = 300, 8 * 3600
 local ISLANDS = { "Gold", "Diamond", "Cosmic", "Lava", "Toxic", "Glitch" }
+local RARITY_RANK = { Common = 1, Rare = 2, Epic = 3, Legendary = 4, Mythic = 5, ["Brainrot God"] = 6, Secret = 7, OG = 8, Unrated = 0 }
 
+-- stat: what is counted. goal: how much is needed. reward: coins / luck (lucky hatches). badge: Roblox badge ID (0 = none yet)
 local ACH = {
-	{ id = "first_hatch", icon = "🥚", name = "First Steps", desc = "Hatch your first brainrot", stat = "hatch", goal = 1, reward = { coins = 250 } },
-	{ id = "hatch_25", icon = "🐣", name = "Egg Enthusiast", desc = "Hatch 25 eggs", stat = "hatch", goal = 25, reward = { spins = 2 } },
-	{ id = "hatch_250", icon = "🌟", name = "Egg Legend", desc = "Hatch 250 eggs", stat = "hatch", goal = 250, reward = { luck = 10 } },
-	{ id = "break_100", icon = "💰", name = "Treasure Hunter", desc = "Break 100 treasures", stat = "breaks", goal = 100, reward = { coins = 2000 } },
-	{ id = "break_1000", icon = "💎", name = "Treasure Tycoon", desc = "Break 1,000 treasures", stat = "breaks", goal = 1000, reward = { spins = 5 } },
-	{ id = "vault_1", icon = "🏦", name = "Vault Cracker", desc = "Break into a vault", stat = "vaults", goal = 1, reward = { spins = 1 } },
-	{ id = "event_vault", icon = "💥", name = "Team Player", desc = "Help crack a Giant Vault", stat = "eventVaults", goal = 1, reward = { spins = 3 } },
-	{ id = "catch_1", icon = "🎯", name = "Gotcha!", desc = "Catch a wild brainrot", stat = "catches", goal = 1, reward = { luck = 3 } },
-	{ id = "catch_25", icon = "🧲", name = "Brainrot Wrangler", desc = "Catch 25 wild brainrots", stat = "catches", goal = 25, reward = { spins = 5 } },
-	{ id = "island_1", icon = "🌴", name = "Island Hopper", desc = "Unlock Gold Island", stat = "islands", goal = 1, reward = { coins = 1000 } },
-	{ id = "island_6", icon = "🌍", name = "World Traveler", desc = "Unlock all 6 islands", stat = "islands", goal = 6, reward = { spins = 10, luck = 10 } },
-	{ id = "index_50", icon = "📖", name = "Collector", desc = "Discover 50 brainrots", stat = "index", goal = 50, reward = { spins = 3 } },
-	{ id = "index_200", icon = "📚", name = "Archivist", desc = "Discover 200 brainrots", stat = "index", goal = 200, reward = { spins = 8 } },
-	{ id = "streak_7", icon = "🔥", name = "Loyal Fan", desc = "Reach a 7-day login streak", stat = "streak", goal = 7, reward = { spins = 5 } },
-	{ id = "millionaire", icon = "🤑", name = "Millionaire", desc = "Hold 1,000,000 coins", stat = "money", goal = 1000000, reward = { spins = 3 } },
-	{ id = "shiny", icon = "✨", name = "Shiny!", desc = "Fuse a brainrot to level 5", stat = "bestFusion", goal = 5, reward = { luck = 5 } },
-	{ id = "rainbow", icon = "🌈", name = "Over the Rainbow", desc = "Fuse a brainrot to level 10", stat = "bestFusion", goal = 10, reward = { spins = 10 } },
-	{ id = "friends", icon = "👥", name = "Better Together", desc = "Play with a friend", stat = "friends", goal = 1, reward = { spins = 2 } },
+	-- getting started
+	{ id = "welcome", icon = "👋", name = "Welcome to the Plaza", desc = "Join Brainrot Plaza for the first time", stat = "joined", goal = 1, reward = { coins = 100 }, badge = 0 },
+	{ id = "first_hatch", icon = "🥚", name = "First Steps", desc = "Hatch your first brainrot", stat = "hatch", goal = 1, reward = { coins = 250 }, badge = 0 },
+	{ id = "friends", icon = "👥", name = "Better Together", desc = "Play in the same server as a friend", stat = "friends", goal = 1, reward = { luck = 3 }, badge = 0 },
+	-- hatching
+	{ id = "hatch_25", icon = "🐣", name = "Egg Enthusiast", desc = "Hatch 25 eggs", stat = "hatch", goal = 25, reward = { luck = 3 }, badge = 0 },
+	{ id = "hatch_250", icon = "🌟", name = "Egg Legend", desc = "Hatch 250 eggs", stat = "hatch", goal = 250, reward = { luck = 10 }, badge = 0 },
+	{ id = "hatch_1000", icon = "👑", name = "Egg Royalty", desc = "Hatch 1,000 eggs", stat = "hatch", goal = 1000, reward = { coins = 250000, luck = 25 }, badge = 0 },
+	{ id = "lucky_legendary", icon = "🍀", name = "Lucky Pull", desc = "Hatch a Legendary (or rarer) brainrot", stat = "bestRarity", goal = 4, reward = { luck = 3 }, badge = 0 },
+	{ id = "lucky_mythic", icon = "💜", name = "Mythic Moment", desc = "Hatch a Mythic (or rarer) brainrot", stat = "bestRarity", goal = 5, reward = { luck = 5 }, badge = 0 },
+	{ id = "lucky_secret", icon = "🤫", name = "It's a Secret!", desc = "Hatch a Secret (or OG) brainrot", stat = "bestRarity", goal = 7, reward = { coins = 50000, luck = 10 }, badge = 0 },
+	{ id = "lucky_og", icon = "🔥", name = "OG Status", desc = "Hatch an OG brainrot", stat = "bestRarity", goal = 8, reward = { coins = 100000, luck = 15 }, badge = 0 },
+	{ id = "glitch", icon = "👾", name = "Glitch in the System", desc = "Hatch or catch a Glitch brainrot", stat = "glitch", goal = 1, reward = { luck = 5 }, badge = 0 },
+	-- treasure
+	{ id = "break_100", icon = "💰", name = "Treasure Hunter", desc = "Break 100 treasures", stat = "breaks", goal = 100, reward = { coins = 2000 }, badge = 0 },
+	{ id = "break_1000", icon = "💎", name = "Treasure Tycoon", desc = "Break 1,000 treasures", stat = "breaks", goal = 1000, reward = { coins = 25000 }, badge = 0 },
+	{ id = "break_10000", icon = "🏆", name = "Treasure Legend", desc = "Break 10,000 treasures", stat = "breaks", goal = 10000, reward = { coins = 250000, luck = 10 }, badge = 0 },
+	{ id = "vault_1", icon = "🏦", name = "Vault Cracker", desc = "Break into a vault", stat = "vaults", goal = 1, reward = { coins = 1500 }, badge = 0 },
+	{ id = "event_vault", icon = "💥", name = "Team Player", desc = "Help crack a Giant Vault", stat = "eventVaults", goal = 1, reward = { luck = 3 }, badge = 0 },
+	{ id = "event_vault_10", icon = "🧨", name = "Heist Crew", desc = "Help crack 10 Giant Vaults", stat = "eventVaults", goal = 10, reward = { coins = 100000, luck = 10 }, badge = 0 },
+	-- bosses
+	{ id = "boss_1", icon = "⚔️", name = "Boss Slayer", desc = "Help defeat an island boss", stat = "bosses", goal = 1, reward = { coins = 5000, luck = 3 }, badge = 0 },
+	{ id = "boss_25", icon = "🗡️", name = "Boss Hunter", desc = "Help defeat 25 island bosses", stat = "bosses", goal = 25, reward = { coins = 100000, luck = 10 }, badge = 0 },
+	{ id = "boss_all", icon = "🏰", name = "King of the Islands", desc = "Defeat the boss on all 6 islands", stat = "bossIslands", goal = 6, reward = { coins = 500000, luck = 25 }, badge = 0 },
+	-- wild brainrots
+	{ id = "catch_1", icon = "🎯", name = "Gotcha!", desc = "Catch a wild brainrot", stat = "catches", goal = 1, reward = { luck = 3 }, badge = 0 },
+	{ id = "catch_25", icon = "🧲", name = "Brainrot Wrangler", desc = "Catch 25 wild brainrots", stat = "catches", goal = 25, reward = { luck = 10 }, badge = 0 },
+	{ id = "catch_100", icon = "🕸️", name = "Brainrot Whisperer", desc = "Catch 100 wild brainrots", stat = "catches", goal = 100, reward = { coins = 150000, luck = 15 }, badge = 0 },
+	{ id = "storm_1", icon = "⛈️", name = "Storm Chaser", desc = "Be online during a Brainrot Storm", stat = "storms", goal = 1, reward = { luck = 3 }, badge = 0 },
+	-- islands
+	{ id = "island_1", icon = "🌴", name = "Island Hopper", desc = "Unlock Gold Island", stat = "islands", goal = 1, reward = { coins = 1000 }, badge = 0 },
+	{ id = "island_3", icon = "🧭", name = "Explorer", desc = "Unlock 3 islands", stat = "islands", goal = 3, reward = { luck = 5 }, badge = 0 },
+	{ id = "island_6", icon = "🌍", name = "World Traveler", desc = "Unlock all 6 islands", stat = "islands", goal = 6, reward = { coins = 250000, luck = 10 }, badge = 0 },
+	-- collection
+	{ id = "index_50", icon = "📖", name = "Collector", desc = "Discover 50 brainrots", stat = "index", goal = 50, reward = { luck = 5 }, badge = 0 },
+	{ id = "index_200", icon = "📚", name = "Archivist", desc = "Discover 200 brainrots", stat = "index", goal = 200, reward = { luck = 15 }, badge = 0 },
+	{ id = "first_fuse", icon = "🧪", name = "Mad Scientist", desc = "Fuse a brainrot", stat = "bestFusion", goal = 1, reward = { coins = 1000 }, badge = 0 },
+	{ id = "shiny", icon = "✨", name = "Shiny!", desc = "Fuse a brainrot to level 5", stat = "bestFusion", goal = 5, reward = { luck = 5 }, badge = 0 },
+	{ id = "rainbow", icon = "🌈", name = "Over the Rainbow", desc = "Fuse a brainrot to level 10", stat = "bestFusion", goal = 10, reward = { coins = 100000, luck = 10 }, badge = 0 },
+	-- progress
+	{ id = "rebirth_1", icon = "🔁", name = "Born Again", desc = "Rebirth for the first time", stat = "rebirths", goal = 1, reward = { luck = 5 }, badge = 0 },
+	{ id = "rebirth_10", icon = "♾️", name = "Rebirth Legend", desc = "Rebirth 10 times", stat = "rebirths", goal = 10, reward = { luck = 25 }, badge = 0 },
+	{ id = "millionaire", icon = "🤑", name = "Millionaire", desc = "Hold 1,000,000 coins", stat = "money", goal = 1000000, reward = { luck = 5 }, badge = 0 },
+	{ id = "billionaire", icon = "💸", name = "Billionaire", desc = "Hold 1,000,000,000 coins", stat = "money", goal = 1000000000, reward = { luck = 25 }, badge = 0 },
+	-- coming back
+	{ id = "streak_7", icon = "📅", name = "Loyal Fan", desc = "Reach a 7-day login streak", stat = "streak", goal = 7, reward = { luck = 5 }, badge = 0 },
+	{ id = "streak_30", icon = "🗓️", name = "Superfan", desc = "Reach a 30-day login streak", stat = "streak", goal = 30, reward = { coins = 100000, luck = 25 }, badge = 0 },
+	{ id = "daily_10", icon = "🍌", name = "Banana's Helper", desc = "Finish 10 daily quests", stat = "dailyQuests", goal = 10, reward = { coins = 10000 }, badge = 0 },
+	{ id = "daily_100", icon = "🏅", name = "Banana's Best Friend", desc = "Finish 100 daily quests", stat = "dailyQuests", goal = 100, reward = { luck = 20 }, badge = 0 },
 }
--- achievement id -> Roblox badge id (0 = no badge yet). Example: first_hatch = 1234567890,
-local BADGES = {}
 
 local function fmt(n) local s = tostring(math.floor(n)):reverse():gsub("(%d%d%d)", "%1,"):reverse() return (s:gsub("^,", "")) end
-local function dataOf(plr) for _ = 1, 150 do local d = _G.PlazaGetData and _G.PlazaGetData(plr) if d then return d end task.wait(0.1) end end
+local function dataOf(plr) -- loading can wait for the player's previous server to finish saving
+	for _ = 1, 600 do
+		if not plr.Parent then return end
+		local d = _G.PlazaGetData and _G.PlazaGetData(plr)
+		if d then return d end
+		task.wait(0.1)
+	end
+end
 local function describe(r)
 	local p = {}
 	if r.coins then table.insert(p, fmt(r.coins) .. " coins") end
@@ -62,17 +103,47 @@ local function islandsOf(plr)
 	end
 	return n
 end
+local function count(t) local n = 0; if type(t) == "table" then for _ in pairs(t) do n += 1 end end; return n end
+
+---------------------------------------------------------------- badges
+-- Remembers which badges we already know a player has, so we only ask Roblox once per session.
+local hasBadge = {}
+local function giveBadge(plr, badgeId)
+	if type(badgeId) ~= "number" or badgeId <= 0 or not plr.Parent then return end
+	hasBadge[plr] = hasBadge[plr] or {}
+	if hasBadge[plr][badgeId] then return end
+	local okHas, owned = pcall(BadgeService.UserHasBadgeAsync, BadgeService, plr.UserId, badgeId)
+	if okHas and owned then hasBadge[plr][badgeId] = true; return end
+	for attempt = 1, 2 do
+		local ok, err = pcall(BadgeService.AwardBadge, BadgeService, plr.UserId, badgeId)
+		if ok then hasBadge[plr][badgeId] = true; return end
+		if attempt == 2 then warn(("SocialAndRewardsServer: couldn't award badge %d to %s: %s"):format(badgeId, plr.Name, tostring(err))) end
+		task.wait(2)
+	end
+end
+-- players who earned achievements before a badge existed get it when they join
+local function catchUpBadges(plr, d)
+	for _, a in ipairs(ACH) do
+		if (a.badge or 0) > 0 and d.Achievements and d.Achievements[a.id] then
+			giveBadge(plr, a.badge)
+			task.wait(0.25) -- stay well under Roblox's badge request limits
+		end
+	end
+end
 
 ---------------------------------------------------------------- achievements
 local function statValue(plr, d, stat)
-	local s = d.AchStats or {}
-	if stat == "islands" then return islandsOf(plr)
-	elseif stat == "index" then local n = 0; for _ in pairs(d.Discovered or {}) do n += 1 end; return n
+	local s = type(d.AchStats) == "table" and d.AchStats or {}
+	if stat == "joined" then return 1
+	elseif stat == "islands" then return islandsOf(plr)
+	elseif stat == "index" then return count(d.Discovered)
 	elseif stat == "streak" then return type(d.Login) == "table" and d.Login.streak or 0
 	elseif stat == "money" then return d.Money or 0
+	elseif stat == "rebirths" then return d.Rebirths or 0
 	elseif stat == "bestFusion" then local m = 0; for _, lv in pairs(d.FusionLevels or {}) do m = math.max(m, lv) end; return m
+	elseif stat == "bossIslands" then return count(s.bossIslands)
 	elseif stat == "friends" then return plr:GetAttribute("FriendCount") or 0 end
-	return s[stat] or 0
+	return tonumber(s[stat]) or 0
 end
 local function achState(plr, d)
 	local list = {}
@@ -99,21 +170,46 @@ local function check(plr)
 			if r.luck then d.LuckRolls = (d.LuckRolls or 0) + r.luck end
 			if _G.PlazaSyncPlayer then _G.PlazaSyncPlayer(plr) end
 			SocialEvent:FireClient(plr, "achievement", { icon = a.icon, name = a.name, desc = a.desc, reward = describe(r) })
-			local badge = BADGES[a.id]
-			if badge and badge > 0 then task.spawn(pcall, BadgeService.AwardBadge, BadgeService, plr.UserId, badge) end
+			if (a.badge or 0) > 0 then task.spawn(giveBadge, plr, a.badge) end
 		end
 	end
 	plr:SetAttribute("Achievements", unlocked)
 	plr:SetAttribute("AchievementsTotal", #ACH)
 end
-local function bump(plr, stat, n)
+local function statsOf(plr)
 	local d = _G.PlazaGetData and _G.PlazaGetData(plr)
 	if not d then return end
 	d.AchStats = type(d.AchStats) == "table" and d.AchStats or {}
-	d.AchStats[stat] = (d.AchStats[stat] or 0) + (n or 1)
+	return d.AchStats, d
+end
+local function bump(plr, stat, n)
+	local s = statsOf(plr); if not s then return end
+	s[stat] = (tonumber(s[stat]) or 0) + (n or 1)
 	check(plr)
 end
-_G.PlazaAchievementEvent = function(plr, what) if what == "catch" then bump(plr, "catches") end end
+local function noteBrainrot(plr, id) -- rarest hatch so far + Glitch brainrots
+	local s = statsOf(plr); if not s then return end
+	local e = okCat and Catalog.ById and Catalog.ById[id]
+	if not e then return end
+	s.bestRarity = math.max(tonumber(s.bestRarity) or 0, RARITY_RANK[e.rarity] or 0)
+	if e.variant == "Glitch" then s.glitch = (tonumber(s.glitch) or 0) + 1 end
+end
+-- other scripts report events here: "catch" (WildCaptureAndStorms), "boss" (IslandBossServer), "dailyQuest" (DailyRewardsServer)
+_G.PlazaAchievementEvent = function(plr, what, arg)
+	if what == "catch" then
+		noteBrainrot(plr, arg)
+		bump(plr, "catches")
+	elseif what == "boss" then
+		local s = statsOf(plr); if not s then return end
+		if type(arg) == "string" then
+			s.bossIslands = type(s.bossIslands) == "table" and s.bossIslands or {}
+			s.bossIslands[arg] = true
+		end
+		bump(plr, "bosses")
+	elseif what == "dailyQuest" then
+		bump(plr, "dailyQuests")
+	end
+end
 
 -- event sources
 task.spawn(function()
@@ -132,9 +228,9 @@ task.spawn(function() -- hatches (all eggs go through _G.PlazaOnHatch)
 	while not _G.PlazaOnHatch do task.wait(0.5) end
 	task.wait(2) -- let DailyRewardsServer wrap it first; we just chain on top
 	local original = _G.PlazaOnHatch
-	_G.PlazaOnHatch = function(plr, ...)
-		local results = table.pack(original(plr, ...))
-		task.defer(bump, plr, "hatch", 1)
+	_G.PlazaOnHatch = function(plr, d, id, ...)
+		local results = table.pack(original(plr, d, id, ...))
+		task.defer(function() noteBrainrot(plr, id); bump(plr, "hatch", 1) end)
 		return table.unpack(results, 1, results.n)
 	end
 end)
@@ -148,7 +244,18 @@ task.spawn(function() -- giant vault helpers (chain onto the capture hook)
 		return original(model, ledger)
 	end
 end)
-task.spawn(function() -- money / islands / streak / fusion / index are read live; re-check now and then
+-- Brainrot Storms (WildCaptureAndStorms): everyone online counts once per storm
+local function countStorm(plr)
+	local endsAt = RS:GetAttribute("StormEndsAt")
+	local s = statsOf(plr)
+	if not endsAt or not s or s.lastStorm == endsAt then return end
+	s.lastStorm = endsAt
+	bump(plr, "storms", 1)
+end
+RS:GetAttributeChangedSignal("StormEndsAt"):Connect(function()
+	for _, plr in ipairs(Players:GetPlayers()) do task.spawn(countStorm, plr) end
+end)
+task.spawn(function() -- money / islands / streak / fusion / index / rebirths are read live; re-check now and then
 	while true do
 		task.wait(6)
 		for _, plr in ipairs(Players:GetPlayers()) do pcall(check, plr) end
@@ -205,6 +312,8 @@ Players.PlayerAdded:Connect(function(plr)
 		end
 		if d then
 			check(plr)
+			countStorm(plr)
+			task.spawn(catchUpBadges, plr, d)
 			task.wait(6) -- after the join screen
 			if plr.Parent then offlineOffer(plr, d) end
 		end
@@ -213,6 +322,7 @@ end)
 for _, plr in ipairs(Players:GetPlayers()) do task.spawn(function() local d = dataOf(plr); refreshFriends(); if d then check(plr) end end) end
 Players.PlayerRemoving:Connect(function(plr)
 	pendingOffline[plr] = nil
+	hasBadge[plr] = nil
 	task.defer(refreshFriends)
 end)
 

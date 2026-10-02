@@ -56,7 +56,8 @@ local function fmt(n)
 	return (s:gsub("^,", ""))
 end
 local function dataOf(plr)
-	for _ = 1, 150 do
+	for _ = 1, 600 do -- loading can wait for the player's previous server to finish saving
+		if not plr.Parent then return end
 		local d = _G.PlazaGetData and _G.PlazaGetData(plr)
 		if d then return d end
 		task.wait(0.1)
@@ -246,6 +247,7 @@ DailyAction.OnServerInvoke = function(plr, action, arg)
 			if e.claimed then return false, "Already claimed" end
 			if e.progress < targetOf(q, daily) then return false, "Not finished yet" end
 			e.claimed = true
+			if _G.PlazaAchievementEvent then task.spawn(_G.PlazaAchievementEvent, plr, "dailyQuest") end
 			return true, { text = give(plr, d, { coins = q.reward }, daily.mult) }
 		elseif action == "claimBonus" then
 			local daily = ensureDaily(plr, d)

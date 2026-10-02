@@ -5,7 +5,6 @@ local Players=game:GetService("Players")
 local RS=game:GetService("ReplicatedStorage")
 local SS=game:GetService("ServerStorage")
 local Design=require(RS:WaitForChild("ProgressionDesign"))
-local Balance=require(RS:WaitForChild("GameBalance"))
 
 local remotes=RS:WaitForChild("BrainrotRemotes")
 local QuestUpdate=remotes:FindFirstChild("QuestUpdate") or Instance.new("RemoteEvent")
@@ -18,8 +17,10 @@ events.Name="ProgressionEvents";events.Parent=SS
 local QuestProgress=events:FindFirstChild("QuestProgress") or Instance.new("BindableEvent")
 QuestProgress.Name="QuestProgress";QuestProgress.Parent=events
 
+local function fmt(n) local s=tostring(math.floor(n)):reverse():gsub("(%d%d%d)","%1,"):reverse() return (s:gsub("^,","")) end
 local function dataOf(plr)
-	for _=1,100 do
+	for _=1,600 do
+		if not plr.Parent then return end
 		local d=_G.PlazaGetData and _G.PlazaGetData(plr)
 		if d then
 			d.QuestProgress=type(d.QuestProgress)=="table" and d.QuestProgress or {}
@@ -59,11 +60,14 @@ local function claimOrAccept(plr,variant)
 	if progress>=q.target then
 		d.QuestCompleted[variant]=true
 		if d.ActiveQuest==variant then d.ActiveQuest="" end
-		if _G.PlazaAwardMoney then _G.PlazaAwardMoney(plr,q.reward) end
-		notify(plr,("🎉 QUEST COMPLETE: %s · +%s coins"):format(q.title,tostring(q.reward)))
+		local paid=q.reward
+		if _G.PlazaAwardMoney then local ok,amount=_G.PlazaAwardMoney(plr,q.reward);if ok then paid=amount end end
+		notify(plr,("🎉 QUEST COMPLETE: %s · +%s coins!"):format(q.title,fmt(paid)))
+	elseif d.ActiveQuest==variant then
+		notify(plr,("🍌 %s: %s/%s done. Keep going! Reward: %s coins."):format(q.title,fmt(progress),fmt(q.target),fmt(q.reward)))
 	else
 		d.ActiveQuest=variant
-		notify(plr,("🍌 %s: %s Reward: %s coins."):format(q.title,q.text,tostring(q.reward)))
+		notify(plr,("🍌 New quest · %s: %s Reward: %s coins."):format(q.title,q.text,fmt(q.reward)))
 	end
 	snapshot(plr)
 end
@@ -164,7 +168,7 @@ for _,variant in ipairs(Design.IslandOrder) do
 		local title=Instance.new("TextLabel");title.BackgroundTransparency=1;title.Position=UDim2.fromOffset(8,5);title.Size=UDim2.new(1,-16,0,34)
 		title.Font=Enum.Font.FredokaOne;title.TextScaled=true;title.TextColor3=Design.IslandColors[variant];title.Text="🍌 "..q.title;title.Parent=frame
 		local body=Instance.new("TextLabel");body.BackgroundTransparency=1;body.Position=UDim2.fromOffset(9,41);body.Size=UDim2.new(1,-18,0,36)
-		body.Font=Enum.Font.GothamBold;body.TextWrapped=true;body.TextScaled=true;body.TextColor3=Color3.new(1,1,1);body.Text=q.short.." · +"..q.reward;body.Parent=frame
+		body.Font=Enum.Font.GothamBold;body.TextWrapped=true;body.TextScaled=true;body.TextColor3=Color3.new(1,1,1);body.Text=q.short.." · +"..fmt(q.reward).." coins";body.Parent=frame
 	  end
 
 		local mechanic=Design.IslandMechanics[variant]
@@ -190,7 +194,7 @@ Players.PlayerAdded:Connect(function(plr)
 				local value=math.min(q.target,plr:GetAttribute("Money") or 0)
 				if value~=(d.QuestProgress[active] or 0) then
 					d.QuestProgress[active]=value;snapshot(plr)
-					if value>=q.target then notify(plr,"✅ Objective complete! Return to Banana Dancana.") end
+					if value>=q.target then notify(plr,"✅ Objective complete! Return to Banana Dancana to claim your reward.") end
 				end
 			end
 			task.wait(1)

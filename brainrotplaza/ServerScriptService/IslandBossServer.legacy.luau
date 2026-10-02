@@ -261,7 +261,7 @@ task.spawn(function()
 			for plr in pairs(ledger) do
 				if typeof(plr) == "Instance" and plr.Parent then
 					helpers += 1
-					if _G.PlazaAchievementEvent then task.spawn(_G.PlazaAchievementEvent, plr, "boss") end
+					if _G.PlazaAchievementEvent then task.spawn(_G.PlazaAchievementEvent, plr, "boss", model:GetAttribute("Variant")) end
 				end
 			end
 			local msg = ("👑 The %s boss on %s Island was defeated by %d player%s! It returns in %d minutes."):format(
