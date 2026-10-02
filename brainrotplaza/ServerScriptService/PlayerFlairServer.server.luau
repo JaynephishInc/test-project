@@ -169,6 +169,7 @@ local function applyAura(char, rebirths)
 end
 
 ---------------------------------------------------------------- refresh loop
+print("[PlayerFlairServer] titles, trails and auras are ON")
 local lastKey = {}
 local function refresh(plr)
 	local d = _G.PlazaGetData and _G.PlazaGetData(plr)

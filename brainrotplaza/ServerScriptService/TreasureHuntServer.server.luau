@@ -52,8 +52,7 @@ local function areas()
 	return list
 end
 local rayParams = RaycastParams.new(); rayParams.FilterType = Enum.RaycastFilterType.Exclude; rayParams.RespectCanCollide = true
-local boxParams = OverlapParams.new(); boxParams.FilterType = Enum.RaycastFilterType.Exclude; boxParams.RespectCanCollide = true
-local function ignored(withTerrain)
+local function ignored()
 	local list = {}
 	for _, n in ipairs({ "PlazaFollowers", "IslandEggs", "IslandVaultEvent", "IslandBossTimers", "GoldenEggHunt" }) do
 		local f = workspace:FindFirstChild(n); if f then table.insert(list, f) end
@@ -61,11 +60,10 @@ local function ignored(withTerrain)
 	local pb = workspace:FindFirstChild("PiazzaBrainrot")
 	local br = pb and pb:FindFirstChild("Breakables"); if br then table.insert(list, br) end
 	for _, p in ipairs(Players:GetPlayers()) do if p.Character then table.insert(list, p.Character) end end
-	if withTerrain then table.insert(list, workspace.Terrain) end
 	return list
 end
 local function groundAt(x, z)
-	local list = ignored(false)
+	local list = ignored()
 	-- skip invisible barriers/ceilings: keep looking below them for real ground
 	for _ = 1, 5 do
 		rayParams.FilterDescendantsInstances = list
@@ -89,14 +87,22 @@ local function findSpot(area)
 	for _ = 1, 60 do
 		local hit = groundAt(c.X + rng:NextNumber(-h, h), c.Z + rng:NextNumber(-h, h))
 		if hit and hit.Normal.Y > 0.9 and math.abs(hit.Position.Y - groundY) < 3 and hit.Material ~= Enum.Material.Water then
-			boxParams.FilterDescendantsInstances = ignored(true)
-			local blocked = workspace:GetPartBoundsInBox(CFrame.new(hit.Position + Vector3.new(0, 3.6, 0)), Vector3.new(6, 6.5, 6), boxParams)
+			-- nothing solid where the egg will sit: 9 rays from just above egg height must land on the same ground
+			-- (raycasts follow the real shape of parts and meshes)
+			local y, blocked = hit.Position.Y, false
+			rayParams.FilterDescendantsInstances = ignored()
+			for _, dx in ipairs({ -3, 0, 3 }) do
+				for _, dz in ipairs({ -3, 0, 3 }) do
+					local r = workspace:Raycast(Vector3.new(hit.Position.X + dx, y + 8, hit.Position.Z + dz), Vector3.new(0, -11, 0), rayParams)
+					if not r or math.abs(r.Position.Y - y) > 1.2 then blocked = true end
+				end
+			end
 			local nearPlayer = false
 			for _, p in ipairs(Players:GetPlayers()) do
 				local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
 				if hrp and (hrp.Position - hit.Position).Magnitude < 25 then nearPlayer = true end
 			end
-			if #blocked == 0 and not nearPlayer then return hit.Position end
+			if not blocked and not nearPlayer then return hit.Position end
 		end
 	end
 	return nil
@@ -238,6 +244,7 @@ hook.OnInvoke = function(variant)
 	return true
 end
 
+print("[TreasureHuntServer] Golden Egg hunt is ON")
 task.spawn(function()
 	task.wait(rng:NextInteger(CONFIG.FirstDelay[1], CONFIG.FirstDelay[2]))
 	while true do

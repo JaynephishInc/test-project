@@ -294,6 +294,7 @@ game:BindToClose(function()
 end)
 
 ---------------------------------------------------------------- clock: board, start/end announcements, top list refresh
+print("[TournamentServer] Weekend Tournament is ON")
 task.spawn(function()
 	local wasLive, lastFetch = state(), 0
 	while true do

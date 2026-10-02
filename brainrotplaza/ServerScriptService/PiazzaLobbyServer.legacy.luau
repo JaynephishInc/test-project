@@ -480,6 +480,7 @@ local function onPlayer(plr)
 	plr.CharacterAdded:Connect(function(c) hookCharacter(plr, c) end)
 	if plr.Character then task.spawn(hookCharacter, plr, plr.Character) end
 end
+print("[PiazzaLobbyServer] loaded: saving with session lock is ON")
 Players.PlayerAdded:Connect(onPlayer)
 for _, p in ipairs(Players:GetPlayers()) do task.spawn(onPlayer, p) end
 -- other parts of this script (the wheel) finish anything owed to the player here, before the last save

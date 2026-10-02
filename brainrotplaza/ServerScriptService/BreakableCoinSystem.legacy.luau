@@ -89,14 +89,17 @@ local function chooseTarget(plr,model)
 end
 -- Random respawn ---------------------------------------------------------------------------------------
 -- Coins, bags, chests and other treasure come back somewhere NEW instead of the same spot. They stay in their own
--- area: island treasure stays on its island, plaza treasure stays with the other plaza treasure. A spot must be
--- flat ground at the same height as the original (no rooftops, no water) with nothing solid in the way.
+-- area: island treasure stays on its island, plaza treasure stays with the other plaza treasure. A spot must be open
+-- sky (not inside a building), flat ground at the area's normal height (no rooftops, no water), with nothing solid
+-- where the treasure would stand. Every check uses raycasts, which follow the real shape of parts and meshes.
 -- Bosses, vaults, event vaults and wild brainrots keep their spots. Set FixedSpawn = true on a model to keep it in place.
-local SPAWN_TRIES=40
+local SPAWN_TRIES=60
 local SPAWN_GAP=9        -- studs between treasures
 local AREA_LINK=120      -- plaza treasure this close together counts as one area
 local AREA_MARGIN=25     -- treasure can appear this far past the outermost original spot
 local homes={}           -- model -> {cf, groundY, height, size, area}
+local areaGround={}      -- area box -> the usual ground height there
+local reported={}        -- model -> true once we've said in Output that it couldn't find a spot
 local rng=Random.new()
 local function canMove(model)
 	if model:GetAttribute("FixedSpawn") or model:GetAttribute("IsBoss") or model:GetAttribute("EventVault")
@@ -104,23 +107,20 @@ local function canMove(model)
 	local t=typeOf(model)
 	return t~="Vault" and t~="Boss"
 end
-local function ignoreList(withCharacters)
-	local list={folder,workspace.Terrain}
-	for _,name in ipairs({"PlazaFollowers","IslandEggs","IslandVaultEvent","IslandQuestGivers"}) do
+local rayParams=RaycastParams.new();rayParams.FilterType=Enum.RaycastFilterType.Exclude;rayParams.RespectCanCollide=true
+local function refreshIgnore()
+	local list={folder}
+	for _,name in ipairs({"PlazaFollowers","IslandEggs","IslandVaultEvent","IslandQuestGivers","IslandBossTimers","GoldenEggHunt"}) do
 		local f=workspace:FindFirstChild(name);if f then table.insert(list,f) end
 	end
-	if withCharacters then for _,p in ipairs(Players:GetPlayers()) do if p.Character then table.insert(list,p.Character) end end end
-	return list
-end
-local rayParams=RaycastParams.new();rayParams.FilterType=Enum.RaycastFilterType.Exclude;rayParams.RespectCanCollide=true
-local overlapParams=OverlapParams.new();overlapParams.FilterType=Enum.RaycastFilterType.Exclude;overlapParams.RespectCanCollide=true
-local function groundBelow(x,z,fromY)
-	local list=ignoreList(true);table.remove(list,2) -- keep Terrain for the ground ray
+	for _,p in ipairs(Players:GetPlayers()) do if p.Character then table.insert(list,p.Character) end end
 	rayParams.FilterDescendantsInstances=list
-	return workspace:Raycast(Vector3.new(x,fromY,z),Vector3.new(0,-200,0),rayParams)
 end
--- size of the visible treasure (the invisible Hitbox is often bigger than the treasure itself)
-local function visibleSize(model)
+local function groundBelow(x,z,fromY,depth)
+	return workspace:Raycast(Vector3.new(x,fromY,z),Vector3.new(0,-(depth or 300),0),rayParams)
+end
+-- box around the visible treasure (the invisible Hitbox is often bigger than the treasure itself)
+local function visibleBounds(model)
 	local lo,hi=Vector3.one*math.huge,-Vector3.one*math.huge
 	for _,part in ipairs(model:GetDescendants()) do
 		if part:IsA("BasePart") and part.Name~="Hitbox" then
@@ -130,16 +130,20 @@ local function visibleSize(model)
 			end end end
 		end
 	end
-	return lo.X<math.huge and (hi-lo) or model:GetExtentsSize()
+	if lo.X==math.huge then local cf,size=model:GetBoundingBox();lo,hi=cf.Position-size/2,cf.Position+size/2 end
+	return lo,hi
 end
 local function rememberHome(model)
 	if homes[model] or not canMove(model) then return end
 	local cf=model:GetPivot()
-	local hit=groundBelow(cf.X,cf.Z,cf.Y+3) -- start just above it so a roof or tree overhead doesn't count as ground
+	local lo,hi=visibleBounds(model)
+	local mid=(lo+hi)/2
+	refreshIgnore()
+	-- start just above the treasure's bottom so a roof or tree overhead doesn't count as its ground
+	local hit=groundBelow(mid.X,mid.Z,math.max(lo.Y+1.5,mid.Y),60)
 	if not hit then return end
-	local size=visibleSize(model)
 	local island=model.Name:match("^Island_([^_]+)_")
-	homes[model]={cf=cf,groundY=hit.Position.Y,height=cf.Y-hit.Position.Y,size=size,area=island and ("island:"..island) or "plaza"}
+	homes[model]={cf=cf,groundY=hit.Position.Y,height=cf.Y-hit.Position.Y,size=hi-lo,area=island and ("island:"..island) or "plaza"}
 end
 -- the box (in X/Z) this model is allowed to respawn in: around every original spot in its area
 local function areaBox(model)
@@ -163,35 +167,73 @@ local function areaBox(model)
 	for _,m in ipairs(members) do minX=math.min(minX,m.cf.X);maxX=math.max(maxX,m.cf.X);minZ=math.min(minZ,m.cf.Z);maxZ=math.max(maxZ,m.cf.Z) end
 	return minX-AREA_MARGIN,maxX+AREA_MARGIN,minZ-AREA_MARGIN,maxZ+AREA_MARGIN
 end
-local function spotIsFree(model,h,ground)
-	if math.abs(ground.Position.Y-h.groundY)>3 or ground.Normal.Y<0.9 or ground.Material==Enum.Material.Water then return false end
-	local p=ground.Position
+-- the most common ground height in the box (the middle value of 25 samples, so rooftops don't count)
+local function usualGround(minX,maxX,minZ,maxZ,near)
+	local key=("%d,%d,%d,%d"):format(math.floor(minX),math.floor(maxX),math.floor(minZ),math.floor(maxZ))
+	if areaGround[key] then return areaGround[key] end
+	local ys={}
+	for _=1,25 do
+		local hit=groundBelow(rng:NextNumber(minX,maxX),rng:NextNumber(minZ,maxZ),near+80)
+		if hit and hit.Normal.Y>0.85 then table.insert(ys,hit.Position.Y) end
+	end
+	if #ys<5 then return near end
+	table.sort(ys)
+	areaGround[key]=ys[math.ceil(#ys/2)]
+	return areaGround[key]
+end
+-- why spots get turned down (shown in Output if a treasure can't find any spot)
+local function checkSpot(model,h,x,z,usualY)
+	local ground=groundBelow(x,z,math.max(h.groundY,usualY)+80) -- from the sky: inside a building we'd hit its roof
+	if not ground then return nil,"noGround" end
+	local y=ground.Position.Y
+	if ground.Normal.Y<0.85 or ground.Material==Enum.Material.Water then return nil,"notFlat" end
+	if math.abs(y-h.groundY)>2.5 and math.abs(y-usualY)>2.5 then return nil,"wrongHeight" end
 	for _,other in ipairs(folder:GetChildren()) do
 		if other~=model and other:IsA("Model") and other:GetAttribute("Active")~=false then
 			local o=other:GetPivot().Position
-			if (Vector3.new(o.X,0,o.Z)-Vector3.new(p.X,0,p.Z)).Magnitude<SPAWN_GAP then return false end
+			if (Vector3.new(o.X,0,o.Z)-Vector3.new(x,0,z)).Magnitude<SPAWN_GAP then return nil,"crowded" end
 		end
 	end
-	overlapParams.FilterDescendantsInstances=ignoreList(false)
-	local box=Vector3.new(math.max(2,h.size.X*0.8),math.max(3,h.size.Y),math.max(2,h.size.Z*0.8))
-	local blocked=workspace:GetPartBoundsInBox(CFrame.new(p+Vector3.new(0,box.Y/2+0.4,0)),box,overlapParams)
-	return #blocked==0
+	for _,p in ipairs(Players:GetPlayers()) do
+		local hrp=p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+		if hrp and (Vector3.new(hrp.Position.X,0,hrp.Position.Z)-Vector3.new(x,0,z)).Magnitude<5 then return nil,"crowded" end
+	end
+	-- nothing solid where it will stand: 9 rays from just above its height must all land on the same ground
+	local r=math.max(1,math.max(h.size.X,h.size.Z)/2+0.5)
+	local top=y+math.max(h.size.Y,3)+1
+	for _,dx in ipairs({-r,0,r}) do
+		for _,dz in ipairs({-r,0,r}) do
+			local hit=groundBelow(x+dx,z+dz,top,top-y+3)
+			if not hit or math.abs(hit.Position.Y-y)>1.2 then return nil,"blocked" end
+		end
+	end
+	return y
 end
 local function moveToRandomSpot(model)
 	local h=homes[model]
-	if not h or not model.Parent then return end
+	if not h or not model.Parent then return false end
+	refreshIgnore()
 	local minX,maxX,minZ,maxZ=areaBox(model)
+	local usualY=usualGround(minX,maxX,minZ,maxZ,h.groundY)
+	local why={}
 	for _=1,SPAWN_TRIES do
 		local x,z=rng:NextNumber(minX,maxX),rng:NextNumber(minZ,maxZ)
-		local ground=groundBelow(x,z,h.groundY+60)
-		if ground and spotIsFree(model,h,ground) then
+		local y,reason=checkSpot(model,h,x,z,usualY)
+		if y then
 			local spin=CFrame.Angles(0,rng:NextNumber(0,math.pi*2),0)
-			model:PivotTo(CFrame.new(x,ground.Position.Y+h.height,z)*spin*h.cf.Rotation)
+			model:PivotTo(CFrame.new(x,y+h.height,z)*spin*h.cf.Rotation)
 			model:SetAttribute("SpawnCF",model:GetPivot()) -- clients that animate treasure can re-read where it is
 			return true
 		end
+		why[reason]=(why[reason] or 0)+1
 	end
-	return false -- no good spot found this time: it comes back where it was
+	if not reported[model] then
+		reported[model]=true
+		local parts={}
+		for k,v in pairs(why) do table.insert(parts,k.." "..v) end
+		warn(("[BreakableCoinSystem] %s couldn't find a new spot, so it came back in the same place (%s)"):format(model.Name,table.concat(parts,", ")))
+	end
+	return false
 end
 
 local function breakModel(model,finisher)
@@ -337,6 +379,10 @@ local function prepare(model)
 	if prompt then promptConnections[model]=prompt.Triggered:Connect(function(plr) chooseTarget(plr,model) end) end
 end
 for _,model in ipairs(folder:GetChildren()) do if model:IsA("Model") then prepare(model) end end
+do
+	local n=0;for _ in pairs(homes) do n+=1 end
+	print(("[BreakableCoinSystem] random respawn is ON for %d treasures"):format(n))
+end
 folder.ChildAdded:Connect(function(model) if model:IsA("Model") then task.defer(prepare,model) end end)
 Players.PlayerRemoving:Connect(function(plr) clearTarget(plr);lastClick[plr]=nil;combos[plr]=nil;for _,ledger in pairs(damageBy) do ledger[plr]=nil end end)
 -- models removed from the folder (event vaults) leave nothing behind
