@@ -1409,13 +1409,6 @@ local MUTATION_EGG_STYLE = {
 local eggFolder = workspace:FindFirstChild("IslandEggs") or workspace:FindFirstChild("ConveyorBrainrots") or Instance.new("Folder")
 eggFolder.Name = "IslandEggs"; eggFolder.Parent = workspace
 local function fmtN(n) local s2 = tostring(math.floor(n)):reverse():gsub("(%d%d%d)", "%1,"):reverse(); return (s2:gsub("^,", "")) end
-local function playersNear(z, half)
-	for _, p in ipairs(Players:GetPlayers()) do
-		local hrp = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-		if hrp and math.abs(hrp.Position.X) < half + 20 and math.abs(hrp.Position.Z - z) < half + 80 then return true end
-	end
-	return false
-end
 local function spawnIslandEgg(conv, variant, isl)
 	local bins = RollPool[variant]; if not bins then return end
 	local total = 0
@@ -1446,7 +1439,7 @@ local function spawnIslandEgg(conv, variant, isl)
 	local theme=MUTATION_EGG_STYLE[variant] or {shell=style.shell,accent=style.crack,material=Enum.Material.Glass}
 	local m=Instance.new("Model");m.Name=existingName
 	local base=CFrame.new(x,y,startZ)*CFrame.Angles(0,math.pi,0)
-	local shell=require(RS:WaitForChild("PremiumEggStyles")).Build(m,variant,base)
+	require(RS:WaitForChild("PremiumEggStyles")).Build(m,variant,base)
 	m:SetAttribute("EggRarity",rarity);m:SetAttribute("CatalogId",entry.id);m:SetAttribute("SpawnTime",workspace:GetServerTimeNow());m:SetAttribute("Speed",ISLAND_EGG_SPEED)
 	m:SetAttribute("StartZ",startZ);m:SetAttribute("EndZ",endZ);m:SetAttribute("X",x);m:SetAttribute("EggY",y);m:SetAttribute("StaticIslandEgg",true);m:SetAttribute("Mutation",variant);m:SetAttribute("Price",price);m:SetAttribute("BaseBrightness",style.bright);m:SetAttribute("RotatesAt",os.time()+Design.EggRotationSeconds)
 	m:PivotTo(base)

@@ -11,10 +11,8 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local SS = game:GetService("ServerStorage")
 local BadgeService = game:GetService("BadgeService")
-local HttpService = game:GetService("HttpService")
 
 local remotes = RS:WaitForChild("BrainrotRemotes")
-local Notify = remotes:WaitForChild("Notify")
 local SocialAction = remotes:FindFirstChild("SocialAction") or Instance.new("RemoteFunction")
 SocialAction.Name = "SocialAction"; SocialAction.Parent = remotes
 local SocialEvent = remotes:FindFirstChild("SocialEvent") or Instance.new("RemoteEvent")

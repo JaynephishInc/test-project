@@ -1,8 +1,6 @@
 -- Active Pet Simulator-style breakable economy
 local Players=game:GetService("Players")
 local RS=game:GetService("ReplicatedStorage")
-local TweenService=game:GetService("TweenService")
-local Debris=game:GetService("Debris")
 local Balance=require(RS:WaitForChild("GameBalance"))
 local Damage=require(game.ServerStorage:WaitForChild("EquippedBreakableDamage"))
 local Design=require(RS:WaitForChild("ProgressionDesign"))
@@ -38,11 +36,6 @@ local function mutationOf(model)
 end
 local function typeOf(model)
 	return model:GetAttribute("BreakableType") or model.Name:match("_([^_]+)$") or "Breakable"
-end
-local function questProgress(plr,kind,source,amount)
-	local events=game.ServerStorage:FindFirstChild("ProgressionEvents")
-	local event=events and events:FindFirstChild("QuestProgress")
-	if event then event:Fire(plr,kind,source,amount or 1,typeOf(source)) end
 end
 local function updateBillboard(model)
 	local max=math.max(1,model:GetAttribute("MaxHealth") or 1)
@@ -94,17 +87,113 @@ local function chooseTarget(plr,model)
   if changed then Notify:FireClient(plr,"Brainrots attacking "..(model:GetAttribute("DisplayName") or model.Name).."!") end
  end
 end
-local function burst(model)
-	local center=model:GetPivot().Position
-	for i=1,9 do
-		local p=Instance.new("Part");p.Name="CoinBurst";p.Anchored=true;p.CanCollide=false;p.CanTouch=false;p.CanQuery=false
-		p.Shape=Enum.PartType.Ball;p.Material=Enum.Material.Neon;p.Color=model:GetAttribute("FXColor") or Color3.fromRGB(255,205,48);p.Size=Vector3.new(.55,.55,.55)
-		p.Position=center+Vector3.new(0,3,0);p.Parent=workspace
-		local angle=i*math.pi*2/9
-		TweenService:Create(p,TweenInfo.new(.65,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{Position=center+Vector3.new(math.cos(angle)*7,5+(i%3),math.sin(angle)*7),Transparency=1,Size=Vector3.new(.2,.2,.2)}):Play()
-		Debris:AddItem(p,.75)
-	end
+-- Random respawn ---------------------------------------------------------------------------------------
+-- Coins, bags, chests and other treasure come back somewhere NEW instead of the same spot. They stay in their own
+-- area: island treasure stays on its island, plaza treasure stays with the other plaza treasure. A spot must be
+-- flat ground at the same height as the original (no rooftops, no water) with nothing solid in the way.
+-- Bosses, vaults, event vaults and wild brainrots keep their spots. Set FixedSpawn = true on a model to keep it in place.
+local SPAWN_TRIES=40
+local SPAWN_GAP=9        -- studs between treasures
+local AREA_LINK=120      -- plaza treasure this close together counts as one area
+local AREA_MARGIN=25     -- treasure can appear this far past the outermost original spot
+local homes={}           -- model -> {cf, groundY, height, size, area}
+local rng=Random.new()
+local function canMove(model)
+	if model:GetAttribute("FixedSpawn") or model:GetAttribute("IsBoss") or model:GetAttribute("EventVault")
+		or model:GetAttribute("OneShot") or model:GetAttribute("IsWildBrainrot") then return false end
+	local t=typeOf(model)
+	return t~="Vault" and t~="Boss"
 end
+local function ignoreList(withCharacters)
+	local list={folder,workspace.Terrain}
+	for _,name in ipairs({"PlazaFollowers","IslandEggs","IslandVaultEvent","IslandQuestGivers"}) do
+		local f=workspace:FindFirstChild(name);if f then table.insert(list,f) end
+	end
+	if withCharacters then for _,p in ipairs(Players:GetPlayers()) do if p.Character then table.insert(list,p.Character) end end end
+	return list
+end
+local rayParams=RaycastParams.new();rayParams.FilterType=Enum.RaycastFilterType.Exclude;rayParams.RespectCanCollide=true
+local overlapParams=OverlapParams.new();overlapParams.FilterType=Enum.RaycastFilterType.Exclude;overlapParams.RespectCanCollide=true
+local function groundBelow(x,z,fromY)
+	local list=ignoreList(true);table.remove(list,2) -- keep Terrain for the ground ray
+	rayParams.FilterDescendantsInstances=list
+	return workspace:Raycast(Vector3.new(x,fromY,z),Vector3.new(0,-200,0),rayParams)
+end
+-- size of the visible treasure (the invisible Hitbox is often bigger than the treasure itself)
+local function visibleSize(model)
+	local lo,hi=Vector3.one*math.huge,-Vector3.one*math.huge
+	for _,part in ipairs(model:GetDescendants()) do
+		if part:IsA("BasePart") and part.Name~="Hitbox" then
+			local half=part.Size/2
+			for sx=-1,1,2 do for sy=-1,1,2 do for sz=-1,1,2 do
+				local w=part.CFrame:PointToWorldSpace(Vector3.new(half.X*sx,half.Y*sy,half.Z*sz));lo=lo:Min(w);hi=hi:Max(w)
+			end end end
+		end
+	end
+	return lo.X<math.huge and (hi-lo) or model:GetExtentsSize()
+end
+local function rememberHome(model)
+	if homes[model] or not canMove(model) then return end
+	local cf=model:GetPivot()
+	local hit=groundBelow(cf.X,cf.Z,cf.Y+3) -- start just above it so a roof or tree overhead doesn't count as ground
+	if not hit then return end
+	local size=visibleSize(model)
+	local island=model.Name:match("^Island_([^_]+)_")
+	homes[model]={cf=cf,groundY=hit.Position.Y,height=cf.Y-hit.Position.Y,size=size,area=island and ("island:"..island) or "plaza"}
+end
+-- the box (in X/Z) this model is allowed to respawn in: around every original spot in its area
+local function areaBox(model)
+	local h=homes[model]
+	local members={h}
+	if h.area=="plaza" then
+		-- plaza-style treasure: grow the group from this model through treasure within AREA_LINK of each other
+		local open,seen={h},{[h]=true}
+		while #open>0 do
+			local a=table.remove(open)
+			for _,b in pairs(homes) do
+				if not seen[b] and b.area=="plaza" and (Vector3.new(a.cf.X,0,a.cf.Z)-Vector3.new(b.cf.X,0,b.cf.Z)).Magnitude<=AREA_LINK then
+					seen[b]=true;table.insert(open,b);table.insert(members,b)
+				end
+			end
+		end
+	else
+		for _,b in pairs(homes) do if b~=h and b.area==h.area then table.insert(members,b) end end
+	end
+	local minX,maxX,minZ,maxZ=math.huge,-math.huge,math.huge,-math.huge
+	for _,m in ipairs(members) do minX=math.min(minX,m.cf.X);maxX=math.max(maxX,m.cf.X);minZ=math.min(minZ,m.cf.Z);maxZ=math.max(maxZ,m.cf.Z) end
+	return minX-AREA_MARGIN,maxX+AREA_MARGIN,minZ-AREA_MARGIN,maxZ+AREA_MARGIN
+end
+local function spotIsFree(model,h,ground)
+	if math.abs(ground.Position.Y-h.groundY)>3 or ground.Normal.Y<0.9 or ground.Material==Enum.Material.Water then return false end
+	local p=ground.Position
+	for _,other in ipairs(folder:GetChildren()) do
+		if other~=model and other:IsA("Model") and other:GetAttribute("Active")~=false then
+			local o=other:GetPivot().Position
+			if (Vector3.new(o.X,0,o.Z)-Vector3.new(p.X,0,p.Z)).Magnitude<SPAWN_GAP then return false end
+		end
+	end
+	overlapParams.FilterDescendantsInstances=ignoreList(false)
+	local box=Vector3.new(math.max(2,h.size.X*0.8),math.max(3,h.size.Y),math.max(2,h.size.Z*0.8))
+	local blocked=workspace:GetPartBoundsInBox(CFrame.new(p+Vector3.new(0,box.Y/2+0.4,0)),box,overlapParams)
+	return #blocked==0
+end
+local function moveToRandomSpot(model)
+	local h=homes[model]
+	if not h or not model.Parent then return end
+	local minX,maxX,minZ,maxZ=areaBox(model)
+	for _=1,SPAWN_TRIES do
+		local x,z=rng:NextNumber(minX,maxX),rng:NextNumber(minZ,maxZ)
+		local ground=groundBelow(x,z,h.groundY+60)
+		if ground and spotIsFree(model,h,ground) then
+			local spin=CFrame.Angles(0,rng:NextNumber(0,math.pi*2),0)
+			model:PivotTo(CFrame.new(x,ground.Position.Y+h.height,z)*spin*h.cf.Rotation)
+			model:SetAttribute("SpawnCF",model:GetPivot()) -- clients that animate treasure can re-read where it is
+			return true
+		end
+	end
+	return false -- no good spot found this time: it comes back where it was
+end
+
 local function breakModel(model,finisher)
 	if not model:GetAttribute("Active") then return end
 	local ledger=damageBy[model] or {};local total=0
@@ -159,6 +248,7 @@ local function breakModel(model,finisher)
 		local mutation=mutationOf(model)
 		model:SetAttribute("ShieldHealth",mutation=="Diamond" and math.floor(max*0.35) or 0)
 		if mutation=="Glitch" then model:SetAttribute("GlitchModifier",({"Fragile","Rich","Frenzy"})[math.random(1,3)]) end
+		pcall(moveToRandomSpot,model)
 		updateBillboard(model);setVisible(model,true)
 	end)
 end
@@ -237,6 +327,7 @@ local function prepare(model)
 	if mutation=="Glitch" then model:SetAttribute("GlitchModifier",({"Fragile","Rich","Frenzy"})[math.random(1,3)]) end
 	for _,d in ipairs(model:GetDescendants()) do if d:IsA("BasePart") and d:GetAttribute("BreakableTransparency")==nil then d:SetAttribute("BreakableTransparency",d.Transparency) end end
 	updateBillboard(model)
+	pcall(rememberHome,model)
 	local hit=model:FindFirstChild("Hitbox");local click=hit and hit:FindFirstChildOfClass("ClickDetector")
 	if click then connections[model]=click.MouseClick:Connect(function(plr) chooseTarget(plr,model) end) end
 	local prompt=hit and hit:FindFirstChild("FightPrompt")
@@ -247,7 +338,7 @@ folder.ChildAdded:Connect(function(model) if model:IsA("Model") then task.defer(
 Players.PlayerRemoving:Connect(function(plr) clearTarget(plr);lastClick[plr]=nil;combos[plr]=nil;for _,ledger in pairs(damageBy) do ledger[plr]=nil end end)
 -- models removed from the folder (event vaults) leave nothing behind
 folder.ChildRemoved:Connect(function(model)
-	damageBy[model]=nil
+	damageBy[model]=nil;homes[model]=nil
 	if promptConnections[model] then promptConnections[model]:Disconnect();promptConnections[model]=nil end
 	if connections[model] then connections[model]:Disconnect();connections[model]=nil end
 	for plr,target in pairs(targets) do if target==model then clearTarget(plr) end end
