@@ -123,7 +123,15 @@ local function capOf(d) return Inventory.Capacity + (d.ExtraSlots or 0) end
 local function speedOf(d)
 	local base = 16 + 3 * (d.SpeedLevel or 0)
 	return base * ((d.SpeedBoostUntil or 0) > os.time() and 2 or 1)
-e	d.BestPower = math.floor(best * multiplier(d)) + (hat and hat.power or 0); d.BestName = bestName
+end
+local function multiplier(d) return 1 + 0.5 * (d.Rebirths or 0) end
+local function recompute(d)
+	local best, bestName = 0, ""
+	for name, count in pairs(d.Collection) do
+		if count > 0 and (powerOf[name] or 0) > best then best, bestName = powerOf[name], name end
+	end
+	local hat = hatOf(d)
+	d.BestPower = math.floor(best * multiplier(d)) + (hat and hat.power or 0); d.BestName = bestName
 end
 -- Coins per second for one brainrot = rarity base x mutation multiplier
 local COIN_RARITY = { Common = 5, Rare = 12, Epic = 30, Legendary = 75, Mythic = 200, ["Brainrot God"] = 600, Secret = 1500, OG = 5000, Unrated = 20 }
@@ -1731,11 +1739,3 @@ for _, chest in ipairs(taggedInWorld("GiantChest")) do
 	Players.PlayerRemoving:Connect(function(p) dmgBy[p] = nil; last[p] = nil end)
 	refresh()
 end
-nd
-local function multiplier(d) return 1 + 0.5 * (d.Rebirths or 0) end
-local function recompute(d)
-	local best, bestName = 0, ""
-	for name, count in pairs(d.Collection) do
-		if count > 0 and (powerOf[name] or 0) > best then best, bestName = powerOf[name], name end
-	end
-	local hat = hatOf(d)
